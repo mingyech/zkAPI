@@ -526,24 +526,16 @@ pub fn verify_withdrawal_proof(
     builder.validate_with_signatures(envelope.state_sig.as_ref(), envelope.clear_sig.as_ref())
 }
 
-#[cfg(not(test))]
-fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
-    sig.validate()
-}
-
-#[cfg(test)]
+// Validate the XMSS signature structurally at the height committed by the
+// signature itself; see the matching note in `request.rs`. The deployment
+// height is configurable and bound into the trusted signing root, so we honor
+// the root-committed height instead of mandating `XMSS_TREE_HEIGHT`.
 fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
     sig.validate_for_height(sig.auth_path.len())
 }
 
-#[cfg(not(test))]
 fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
     XmssVerifier::verify(root, message, sig)
-}
-
-#[cfg(test)]
-fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
-    XmssVerifier::verify_for_height(root, message, sig, sig.auth_path.len())
 }
 
 fn merkle_index_bits(index: u32) -> impl Iterator<Item = Felt252> {

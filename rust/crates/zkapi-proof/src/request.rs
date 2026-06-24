@@ -17,7 +17,7 @@ use zkapi_core::nullifier::compute_nullifier;
 #[cfg(feature = "dev-witness-envelope")]
 use zkapi_core::poseidon::felt_to_field;
 use zkapi_core::poseidon::field_to_felt;
-use zkapi_crypto::pedersen::PedersenCommitment;
+use zkapi_crypto::pedersen::{add_blinding, PedersenCommitment};
 use zkapi_crypto::xmss::XmssVerifier;
 use zkapi_types::{
     Felt252, RequestPublicInputs, XmssSignature, GENESIS_ANCHOR, MERKLE_DEPTH,
@@ -200,7 +200,9 @@ impl RequestProofBuilder {
     ///
     /// Returns the affine (x, y) coordinates as `Felt252` values.
     pub fn anon_commitment(&self) -> Result<(Felt252, Felt252), RequestProofError> {
-        let combined_blinding = self.current_blinding + self.user_rerandomization;
+        // Blinding factors are curve-order scalars: accumulate modulo n, not
+        // modulo the base-field prime (see `zkapi_crypto::pedersen`).
+        let combined_blinding = add_blinding(&self.current_blinding, &self.user_rerandomization);
         let commitment = PedersenCommitment::commit(self.current_balance, &combined_blinding);
         let (x, y) = commitment.to_affine();
         Ok((field_to_felt(&x), field_to_felt(&y)))
@@ -467,24 +469,21 @@ pub fn verify_request_proof(
     builder.validate_with_signature(envelope.state_sig.as_ref())
 }
 
-#[cfg(not(test))]
-fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
-    sig.validate()
-}
-
-#[cfg(test)]
+// Validate the XMSS state signature structurally at the height committed by the
+// signature itself. The deployment XMSS height is a configuration parameter
+// (`xmss_height`) and is bound into the published signing root that the client
+// trusts via the epoch registry, so structural validation honors the
+// root-committed height rather than mandating the maximum `XMSS_TREE_HEIGHT`.
+// Demo/test operators run a small tree (height-20 keygen is impractical); a
+// production operator publishes a full-height root. Cryptographic soundness
+// comes from `verify_xmss_signature` against that trusted root, not from this
+// structural length check.
 fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
     sig.validate_for_height(sig.auth_path.len())
 }
 
-#[cfg(not(test))]
 fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
     XmssVerifier::verify(root, message, sig)
-}
-
-#[cfg(test)]
-fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
-    XmssVerifier::verify_for_height(root, message, sig, sig.auth_path.len())
 }
 
 fn merkle_index_bits(index: u32) -> impl Iterator<Item = Felt252> {

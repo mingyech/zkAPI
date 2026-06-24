@@ -2536,6 +2536,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "lazy_static",
+ "num-bigint",
  "rand 0.8.5",
  "serde",
  "sha3",
