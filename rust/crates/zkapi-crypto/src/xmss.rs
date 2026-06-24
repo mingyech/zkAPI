@@ -221,8 +221,13 @@ pub struct XmssVerifier;
 
 impl XmssVerifier {
     /// Verify an XMSS signature against a known root.
+    ///
+    /// Structural validation uses the height committed by the signature's own
+    /// authentication path (which `verify_inner` walks); the operator's tree
+    /// height is a deployment parameter bound into `root`, so soundness comes
+    /// from the root match below, not from pinning a fixed `XMSS_TREE_HEIGHT`.
     pub fn verify(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
-        if sig.validate().is_err() {
+        if sig.validate_for_height(sig.auth_path.len()).is_err() {
             return false;
         }
         Self::verify_inner(root, message, sig)
