@@ -3,10 +3,27 @@ pragma solidity ^0.8.28;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
-import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {ZkApiVault} from "../src/ZkApiVault.sol";
 import {MockProofAdapter} from "../src/adapters/MockProofAdapter.sol";
+
+/// @title DemoBillingToken – billing token for the local demo.
+/// @notice Uses 3 decimals (not the ERC20 default of 18) so the protocol's
+///         integer credit amounts render as human-friendly values in wallets:
+///         e.g. a 2000-credit deposit shows as "2.000" in MetaMask instead of
+///         18-decimal dust ("<0.000001"). Exposes a public `mint` for funding.
+contract DemoBillingToken is ERC20 {
+    constructor() ERC20("zkAPI Demo Credit", "ZKAPI") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 3;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
 
 /// @title DeployScript – Local demo deployment for the zkAPI stack.
 /// @notice Used by scripts/e2e-demo.sh. Deploys an ERC20 billing token, a
@@ -36,9 +53,9 @@ contract DeployScript is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // 1. Billing token. ERC20Mock exposes a public mint(); fund the
-        //    deployer, who is also the depositor in the demo flow.
-        ERC20Mock billingToken = new ERC20Mock();
+        // 1. Billing token (3 decimals; see DemoBillingToken). Exposes a public
+        //    mint(); fund the deployer, who is also the depositor in the demo.
+        DemoBillingToken billingToken = new DemoBillingToken();
         if (mintAmount > 0) {
             billingToken.mint(deployer, mintAmount);
         }
