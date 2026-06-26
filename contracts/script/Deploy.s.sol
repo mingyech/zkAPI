@@ -50,6 +50,11 @@ contract DeployScript is Script {
         uint256 mintAmount = vm.envOr("MINT_AMOUNT", uint256(0));
         string memory outputPath = vm.envString("OUTPUT_PATH");
         address deployer = vm.addr(deployerKey);
+        // Treasury (receives the operator's consumed amount on settlement). Kept
+        // SEPARATE from the deployer/depositor so the consumed amount visibly
+        // leaves the depositor's wallet. Defaults to anvil account #1.
+        address treasury =
+            vm.envOr("TREASURY", address(0x70997970C51812dc3A010C7d01b50e0d17dc79C8));
 
         vm.startBroadcast(deployerKey);
 
@@ -64,10 +69,11 @@ contract DeployScript is Script {
         //    plumbing, not STARK soundness.
         MockProofAdapter proofAdapter = new MockProofAdapter();
 
-        // 3. The settlement vault. owner == treasury == deployer.
+        // 3. The settlement vault. owner == deployer (so the demo's onlyOwner
+        //    rotateServerRoots cast succeeds); treasury is a separate account.
         ZkApiVault vault = new ZkApiVault(
             address(billingToken),
-            deployer, // treasury
+            treasury, // treasury (separate from deployer)
             NOTE_TTL,
             REQUEST_CHARGE_CAP,
             POLICY_CHARGE_CAP,
@@ -83,11 +89,13 @@ contract DeployScript is Script {
         string memory manifest = "deployment";
         vm.serializeAddress(manifest, "vault", address(vault));
         vm.serializeAddress(manifest, "billingToken", address(billingToken));
+        vm.serializeAddress(manifest, "treasury", treasury);
         string memory serialized = vm.serializeUint(manifest, "noteTtl", uint256(NOTE_TTL));
         vm.writeJson(serialized, outputPath);
 
         console2.log("vault       ", address(vault));
         console2.log("billingToken", address(billingToken));
+        console2.log("treasury    ", treasury);
         console2.log("proofAdapter", address(proofAdapter));
         console2.log("noteTtl     ", uint256(NOTE_TTL));
         console2.log("manifest    ", outputPath);
