@@ -210,7 +210,7 @@ fn parse_execution_id(output: &str) -> Option<String> {
                 Some(digits)
             }
         })
-        .last()
+        .next_back()
 }
 
 pub fn extract_public_outputs_from_proof(proof: &[u8]) -> Result<Vec<Felt252>, StwoBridgeError> {
