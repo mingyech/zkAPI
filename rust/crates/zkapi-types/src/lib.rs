@@ -23,7 +23,7 @@ pub use note::{Note, NoteStatus, NullifierStatus, PendingWithdrawal};
 pub use signature::XmssSignature;
 
 /// Published server signing roots for one epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EpochRoots {
     pub epoch: u32,
     pub state_root: Felt252,
@@ -42,6 +42,22 @@ pub fn lookup_clear_root(roots: &[EpochRoots], epoch: u32) -> Option<Felt252> {
         .iter()
         .find(|entry| entry.epoch == epoch)
         .map(|entry| entry.clear_root)
+}
+
+#[cfg(test)]
+mod epoch_roots_tests {
+    use super::*;
+
+    #[test]
+    fn epoch_roots_round_trip_as_json() {
+        let roots = EpochRoots {
+            epoch: 7,
+            state_root: Felt252::from_u64(11),
+            clear_root: Felt252::from_u64(13),
+        };
+        let json = serde_json::to_string(&roots).unwrap();
+        assert_eq!(serde_json::from_str::<EpochRoots>(&json).unwrap(), roots);
+    }
 }
 
 /// Protocol version for v1.
