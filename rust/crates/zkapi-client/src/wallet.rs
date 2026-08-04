@@ -18,7 +18,10 @@ use zkapi_core::commitment::{compute_clearance_message, compute_state_message};
 use zkapi_core::leaf::compute_registration_commitment;
 use zkapi_core::nullifier::compute_nullifier;
 use zkapi_core::poseidon::{felt_to_field, field_to_felt};
-use zkapi_crypto::{pedersen::PedersenCommitment, xmss::XmssVerifier};
+use zkapi_crypto::{
+    pedersen::{add_blinding, PedersenCommitment},
+    xmss::XmssVerifier,
+};
 use zkapi_proof::{ProofArtifact, RequestProofBuilder, ScarbStwoProver, WithdrawalProofBuilder};
 use zkapi_types::wire::{
     ApiRequest, ClearanceRequest, ClearanceResponse, ErrorResponse, ProofArtifactWire,
@@ -203,7 +206,7 @@ impl Wallet {
         let siblings = siblings_from_vec(merkle_siblings)?;
 
         // Compute anon_commitment = E(current_balance, current_blinding + user_rerand).
-        let anon_blinding = current_blinding + user_rerandomization;
+        let anon_blinding = add_blinding(&current_blinding, &user_rerandomization);
         let anon_commitment = PedersenCommitment::commit(state.current_balance, &anon_blinding);
         let (anon_cx, anon_cy) = anon_commitment.to_affine();
 
@@ -337,7 +340,10 @@ impl Wallet {
             .ok_or_else(|| ClientError::InvalidResponse("charge exceeds balance".into()))?;
 
         let blind_delta_srv = felt_to_field(&server_resp.blind_delta_srv);
-        let next_blinding = current_blinding + user_rerandomization + blind_delta_srv;
+        let next_blinding = add_blinding(
+            &add_blinding(&current_blinding, &user_rerandomization),
+            &blind_delta_srv,
+        );
         let next_blinding_hex = format!("0x{}", hex::encode(next_blinding.to_bytes_be()));
 
         let mut next_state = state.clone();
@@ -494,8 +500,13 @@ impl Wallet {
             ));
         }
 
-        // Verify the state signature structural validity.
-        if let Err(e) = resp.next_state_sig.validate() {
+        // Verify the state signature structural validity at the root-committed
+        // height (the operator's `xmss_height` is bound into the trusted signing
+        // root; see the note in `zkapi-proof/src/request.rs`).
+        if let Err(e) = resp
+            .next_state_sig
+            .validate_for_height(resp.next_state_sig.auth_path.len())
+        {
             return Err(ClientError::VerificationFailed(format!(
                 "state sig structural check failed: {}",
                 e
@@ -775,7 +786,7 @@ impl Wallet {
                 let state = self.state.as_ref().ok_or(ClientError::NoActiveNote)?;
                 let user_rerandomization = felt_to_field(&journal.user_rerandomization);
                 let current_blinding = parse_blinding(&state.balance_blinding)?;
-                let anon_blinding = current_blinding + user_rerandomization;
+                let anon_blinding = add_blinding(&current_blinding, &user_rerandomization);
                 let anon_commitment =
                     PedersenCommitment::commit(state.current_balance, &anon_blinding);
 
@@ -793,7 +804,10 @@ impl Wallet {
                     .ok_or_else(|| ClientError::InvalidResponse("charge exceeds balance".into()))?;
 
                 let blind_delta_srv = felt_to_field(&server_resp.blind_delta_srv);
-                let next_blinding = current_blinding + user_rerandomization + blind_delta_srv;
+                let next_blinding = add_blinding(
+                    &add_blinding(&current_blinding, &user_rerandomization),
+                    &blind_delta_srv,
+                );
                 let next_blinding_hex = format!("0x{}", hex::encode(next_blinding.to_bytes_be()));
 
                 let mut next_state = state.clone();

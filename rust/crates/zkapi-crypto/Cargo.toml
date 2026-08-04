@@ -14,6 +14,7 @@ sha3            = { workspace = true }
 rand            = { workspace = true }
 thiserror       = { workspace = true }
 lazy_static     = { workspace = true }
+num-bigint      = "0.4"
 starknet-crypto      = { workspace = true }
 starknet-curve       = { workspace = true }
 starknet-types-core  = { workspace = true }

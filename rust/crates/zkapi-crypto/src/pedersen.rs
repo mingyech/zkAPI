@@ -12,12 +12,50 @@
 
 use std::ops::Neg;
 
+use num_bigint::BigUint;
 use starknet_types_core::curve::ProjectivePoint;
 use starknet_types_core::felt::Felt;
 
 /// Type alias for API compatibility with downstream code that uses
 /// `FieldElement`.
 pub type FieldElement = Felt;
+
+/// Order of the Stark curve cyclic group (`EC_ORDER`, denoted `n`).
+///
+/// Pedersen blinding factors are scalars in `Z/nZ`: scalar multiplication
+/// `k * H` only depends on `k mod n`. Crucially `n < p`, the base-field prime
+/// behind [`Felt`]. Accumulating blinding with base-field (`Felt`) addition is
+/// therefore a latent bug — once a running blinding crosses `p` the `Felt`
+/// result wraps by `p`, which does not match the `mod n` semantics of
+/// [`PedersenCommitment::commit`], so the stored blinding silently stops
+/// opening the committed point. All blinding arithmetic must reduce modulo `n`.
+pub const CURVE_ORDER_HEX: &str =
+    "0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f";
+
+fn curve_order() -> BigUint {
+    BigUint::parse_bytes(CURVE_ORDER_HEX.as_bytes(), 16).expect("CURVE_ORDER_HEX is valid hex")
+}
+
+fn biguint_to_felt(value: BigUint) -> Felt {
+    let bytes = value.to_bytes_be();
+    let mut buf = [0u8; 32];
+    // `value` is reduced mod n < p, so it fits in <= 32 bytes.
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    Felt::from_bytes_be(&buf)
+}
+
+/// Reduce a blinding scalar modulo the curve order `n`.
+pub fn reduce_blinding(value: &Felt) -> Felt {
+    biguint_to_felt(value.to_biguint() % curve_order())
+}
+
+/// Add two Pedersen blinding scalars modulo the curve order `n`.
+///
+/// This is the canonical way to accumulate blinding factors across
+/// rerandomization and homomorphic server updates; see [`CURVE_ORDER_HEX`].
+pub fn add_blinding(a: &Felt, b: &Felt) -> Felt {
+    biguint_to_felt((a.to_biguint() + b.to_biguint()) % curve_order())
+}
 
 /// G_balance generator coordinates.
 ///
@@ -263,5 +301,49 @@ mod tests {
 
         let expected_blinding = blinding + rho + blind_delta;
         assert!(updated.verify_opening(balance, &expected_blinding));
+    }
+
+    #[test]
+    fn curve_order_constant_is_group_order() {
+        // n * P == identity for any group element confirms CURVE_ORDER_HEX is
+        // the true Stark curve order.
+        let n = Felt::from_hex_unchecked(CURVE_ORDER_HEX);
+        assert_eq!(scalar_mul(&G_BALANCE, &n), ProjectivePoint::identity());
+        assert_eq!(scalar_mul(&H_BLIND, &n), ProjectivePoint::identity());
+    }
+
+    #[test]
+    fn blinding_accumulation_stays_consistent_past_field_prime() {
+        // Two blinding contributions, each below the base-field prime p, whose
+        // integer sum exceeds p — the case that made `Felt` addition wrap and
+        // diverge from the committed point across multiple requests.
+        let big = Felt::from_hex_unchecked(
+            "0700000000000000000000000000000000000000000000000000000000000000",
+        );
+        let delta = Felt::from_hex_unchecked(
+            "0700000000000000000000000000000000000000000000000000000000000000",
+        );
+
+        // Sanity: the naive base-field sum differs from the mod-n sum here.
+        let felt_sum = big + delta;
+        let mod_n_sum = add_blinding(&big, &delta);
+        assert_ne!(
+            felt_sum, mod_n_sum,
+            "test inputs must actually cross the base-field prime"
+        );
+
+        let balance = 500u128;
+        // Reference: commit then rerandomize, i.e. pure point arithmetic — this
+        // is exactly what the server does homomorphically.
+        let reference = PedersenCommitment::commit(balance, &big).rerandomize(&delta);
+
+        // The mod-n accumulated blinding opens the same point.
+        let via_accumulated = PedersenCommitment::commit(balance, &mod_n_sum);
+        assert_eq!(via_accumulated.point, reference.point);
+        assert!(reference.verify_opening(balance, &mod_n_sum));
+
+        // The naive base-field sum does NOT open the committed point.
+        let via_felt = PedersenCommitment::commit(balance, &felt_sum);
+        assert_ne!(via_felt.point, reference.point);
     }
 }
