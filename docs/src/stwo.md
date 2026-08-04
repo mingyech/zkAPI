@@ -11,6 +11,11 @@ The upstream `stwo-vm-runner` expects a compiled Cairo program with entrypoint
 the VM trace into `ProverInput`, and then `stwo-cairo-prover` can create and
 verify the proof artifact.
 
+The Scarb installation must include the `scarb-execute`, `scarb-prove`, and
+`scarb-verify` companion binaries. Check with `scarb commands`. If any are
+missing, use the complete official Scarb release bundle; a core-only package
+cannot run the production proof path.
+
 Current executable-wrapper status:
 
 - `request_genesis` builds, executes, proves with `scarb prove`, and verifies
