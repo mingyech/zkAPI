@@ -62,10 +62,10 @@ library MerkleUpdateLib {
         uint256 newLeaf,
         uint256[32] calldata siblings
     ) internal pure returns (uint256 newRoot) {
-        uint256 computedOldRoot = computeRoot(index, oldLeaf, siblings);
+        uint256 computedOldRoot;
+        (computedOldRoot, newRoot) = StarkPoseidon.hash3PairPath32(DOMAIN_NODE, index, oldLeaf, newLeaf, siblings);
         if (computedOldRoot != currentRoot) {
             revert Errors.StaleRoot();
         }
-        newRoot = computeRoot(index, newLeaf, siblings);
     }
 }

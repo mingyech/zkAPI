@@ -261,15 +261,7 @@ impl RequestProofBuilder {
             Felt252::from_u64(self.state_sig_epoch as u64),
         ]);
 
-        if let Some(sig) = state_sig {
-            args.push(Felt252::from_u64(sig.leaf_index as u64));
-            args.extend(sig.wots_sig.iter().copied());
-            args.extend(sig.auth_path.iter().copied());
-        } else {
-            args.push(Felt252::ZERO);
-            args.extend(std::iter::repeat_n(Felt252::ZERO, WOTS_LEN));
-            args.extend(std::iter::repeat_n(Felt252::ZERO, XMSS_TREE_HEIGHT));
-        }
+        append_signature_args(&mut args, state_sig);
 
         Ok(args)
     }
@@ -480,7 +472,13 @@ pub fn verify_request_proof(
 // `verify_xmss_signature` against that trusted root, not from this structural
 // length check.
 fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
-    sig.validate_for_height(sig.auth_path.len())
+    let height = sig.auth_path.len();
+    if height == 0 || height > XMSS_TREE_HEIGHT {
+        return Err(format!(
+            "XMSS auth path height must be between 1 and {XMSS_TREE_HEIGHT}, got {height}"
+        ));
+    }
+    sig.validate_for_height(height)
 }
 
 fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
@@ -489,6 +487,27 @@ fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature)
 
 fn merkle_index_bits(index: u32) -> impl Iterator<Item = Felt252> {
     (0..MERKLE_DEPTH).map(move |level| Felt252::from_u64(((index >> level) & 1) as u64))
+}
+
+// Keep the runtime witness shape fixed while allowing an operator to use any
+// XMSS height up to the protocol maximum. Cairo receives the actual height and
+// a zero-padded maximum-size authentication-path slot.
+fn append_signature_args(args: &mut Vec<Felt252>, sig: Option<&XmssSignature>) {
+    if let Some(sig) = sig {
+        args.push(Felt252::from_u64(sig.leaf_index as u64));
+        args.extend(sig.wots_sig.iter().copied());
+        args.push(Felt252::from_u64(sig.auth_path.len() as u64));
+        args.extend(sig.auth_path.iter().copied());
+        args.extend(std::iter::repeat_n(
+            Felt252::ZERO,
+            XMSS_TREE_HEIGHT - sig.auth_path.len(),
+        ));
+    } else {
+        args.push(Felt252::ZERO);
+        args.extend(std::iter::repeat_n(Felt252::ZERO, WOTS_LEN));
+        args.push(Felt252::ZERO);
+        args.extend(std::iter::repeat_n(Felt252::ZERO, XMSS_TREE_HEIGHT));
+    }
 }
 
 #[cfg(test)]
@@ -560,11 +579,12 @@ mod tests {
     fn test_cairo_args_for_genesis_request() {
         let builder = genesis_builder();
         let args = builder.to_cairo_args(None).unwrap();
-        assert_eq!(args.len(), 166);
+        assert_eq!(args.len(), 167);
         assert_eq!(args[0], Felt252::from_u64(1));
         assert_eq!(args[9], Felt252::ZERO);
         assert_eq!(args[77], Felt252::ONE);
         assert_eq!(args[80], Felt252::ZERO);
+        assert_eq!(args[146], Felt252::ZERO);
     }
 
     #[test]

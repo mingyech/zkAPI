@@ -15,17 +15,19 @@ fn xmss_node_hash(left: felt252, right: felt252) -> felt252 {
 /// Verify that `leaf` at position `leaf_index` is included in the XMSS tree
 /// with the given `root`.
 ///
-/// `auth_path` must contain exactly XMSS_TREE_HEIGHT (20) sibling hashes.
+/// `auth_path` commits the configured deployment height and may contain up to
+/// XMSS_TREE_HEIGHT (20) sibling hashes.
 /// `leaf_index` is decomposed into bits internally to determine the path
 /// direction at each level.
 pub fn verify_auth_path(leaf: felt252, leaf_index: u32, auth_path: Span<felt252>, root: felt252) {
-    assert(auth_path.len() == XMSS_TREE_HEIGHT, 'invalid auth path len');
-    assert(leaf_index < 1048576, 'leaf index >= 2^20'); // 2^20 = 1_048_576
+    let tree_height = auth_path.len();
+    assert(tree_height > 0, 'empty auth path');
+    assert(tree_height <= XMSS_TREE_HEIGHT, 'auth path too long');
 
     let mut current = leaf;
     let mut idx = leaf_index;
     let mut i: u32 = 0;
-    while i < XMSS_TREE_HEIGHT {
+    while i < tree_height {
         let sibling = *auth_path.at(i);
         let bit = idx % 2;
         if bit == 0 {
@@ -36,5 +38,6 @@ pub fn verify_auth_path(leaf: felt252, leaf_index: u32, auth_path: Span<felt252>
         idx = idx / 2;
         i += 1;
     }
+    assert(idx == 0, 'leaf index exceeds tree');
     assert(current == root, 'xmss auth path invalid');
 }

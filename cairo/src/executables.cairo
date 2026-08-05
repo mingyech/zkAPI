@@ -88,13 +88,16 @@ fn copy_felts(args: Span<felt252>, start: u32, len: u32) -> Array<felt252> {
 #[executable]
 pub fn request_from_args(args: Array<felt252>) -> Array<felt252> {
     let args_span = args.span();
-    assert(args_span.len() == 166, 'bad request arg count');
+    assert(args_span.len() == 167, 'bad request arg count');
     let merkle_index_bits = copy_felts(args_span, 9, MERKLE_DEPTH);
     let merkle_siblings = copy_felts(args_span, 9 + MERKLE_DEPTH, MERKLE_DEPTH);
     let wots_start = 81;
-    let auth_start = wots_start + 65;
+    let auth_len_index = wots_start + 65;
+    let auth_start = auth_len_index + 1;
+    let auth_len = read_u32(args_span, auth_len_index);
+    assert(auth_len <= XMSS_TREE_HEIGHT, 'auth path too long');
     let wots_sig = copy_felts(args_span, wots_start, 65);
-    let auth_path = copy_felts(args_span, auth_start, XMSS_TREE_HEIGHT);
+    let auth_path = copy_felts(args_span, auth_start, auth_len);
 
     run_request_program(
         read_felt(args_span, 0),
@@ -124,17 +127,23 @@ pub fn request_from_args(args: Array<felt252>) -> Array<felt252> {
 #[executable]
 pub fn withdrawal_from_args(args: Array<felt252>) -> Array<felt252> {
     let args_span = args.span();
-    assert(args_span.len() == 254, 'bad withdrawal arg count');
+    assert(args_span.len() == 256, 'bad withdrawal arg count');
     let merkle_index_bits = copy_felts(args_span, 9, MERKLE_DEPTH);
     let merkle_siblings = copy_felts(args_span, 9 + MERKLE_DEPTH, MERKLE_DEPTH);
     let state_wots_start = 80;
-    let state_auth_start = state_wots_start + 65;
-    let clear_wots_start = 169;
-    let clear_auth_start = clear_wots_start + 65;
+    let state_auth_len_index = state_wots_start + 65;
+    let state_auth_start = state_auth_len_index + 1;
+    let clear_wots_start = 170;
+    let clear_auth_len_index = clear_wots_start + 65;
+    let clear_auth_start = clear_auth_len_index + 1;
+    let state_auth_len = read_u32(args_span, state_auth_len_index);
+    let clear_auth_len = read_u32(args_span, clear_auth_len_index);
+    assert(state_auth_len <= XMSS_TREE_HEIGHT, 'state path too long');
+    assert(clear_auth_len <= XMSS_TREE_HEIGHT, 'clear path too long');
     let state_wots_sig = copy_felts(args_span, state_wots_start, 65);
-    let state_auth_path = copy_felts(args_span, state_auth_start, XMSS_TREE_HEIGHT);
+    let state_auth_path = copy_felts(args_span, state_auth_start, state_auth_len);
     let clear_wots_sig = copy_felts(args_span, clear_wots_start, 65);
-    let clear_auth_path = copy_felts(args_span, clear_auth_start, XMSS_TREE_HEIGHT);
+    let clear_auth_path = copy_felts(args_span, clear_auth_start, clear_auth_len);
 
     run_withdrawal_program(
         read_felt(args_span, 0),
@@ -157,10 +166,10 @@ pub fn withdrawal_from_args(args: Array<felt252>) -> Array<felt252> {
         read_u32(args_span, 79),
         state_wots_sig.span(),
         state_auth_path.span(),
-        read_felt(args_span, 165),
         read_felt(args_span, 166),
-        read_u32(args_span, 167),
+        read_felt(args_span, 167),
         read_u32(args_span, 168),
+        read_u32(args_span, 169),
         clear_wots_sig.span(),
         clear_auth_path.span(),
     )

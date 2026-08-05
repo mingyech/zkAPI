@@ -30,6 +30,9 @@ Current executable-wrapper status:
   verifies with `scarb verify`.
 - `request_from_args` and `withdrawal_from_args` expose flat felt-array
   witness entrypoints for Rust-driven `--arguments-file` execution;
+- runtime XMSS signature slots carry an explicit deployment height and pad the
+  private authentication path to the protocol maximum, allowing roots from
+  configured trees up to height 20 without changing the witness shape;
 - `zkapi-client` produces opaque `ProofArtifactWire` values by invoking
   `ScarbStwoProver` in default mode;
 - `zkapi-server` verifies `ProofArtifactWire` values by checking the canonical

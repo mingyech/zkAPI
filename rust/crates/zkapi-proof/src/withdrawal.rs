@@ -531,7 +531,13 @@ pub fn verify_withdrawal_proof(
 // height is configurable and bound into the trusted signing root, so we honor
 // the root-committed height instead of mandating `XMSS_TREE_HEIGHT`.
 fn validate_xmss_signature(sig: &XmssSignature) -> Result<(), String> {
-    sig.validate_for_height(sig.auth_path.len())
+    let height = sig.auth_path.len();
+    if height == 0 || height > XMSS_TREE_HEIGHT {
+        return Err(format!(
+            "XMSS auth path height must be between 1 and {XMSS_TREE_HEIGHT}, got {height}"
+        ));
+    }
+    sig.validate_for_height(height)
 }
 
 fn verify_xmss_signature(root: &Felt252, message: &Felt252, sig: &XmssSignature) -> bool {
@@ -546,10 +552,16 @@ fn append_signature_args(args: &mut Vec<Felt252>, sig: Option<&XmssSignature>) {
     if let Some(sig) = sig {
         args.push(Felt252::from_u64(sig.leaf_index as u64));
         args.extend(sig.wots_sig.iter().copied());
+        args.push(Felt252::from_u64(sig.auth_path.len() as u64));
         args.extend(sig.auth_path.iter().copied());
+        args.extend(std::iter::repeat_n(
+            Felt252::ZERO,
+            XMSS_TREE_HEIGHT - sig.auth_path.len(),
+        ));
     } else {
         args.push(Felt252::ZERO);
         args.extend(std::iter::repeat_n(Felt252::ZERO, WOTS_LEN));
+        args.push(Felt252::ZERO);
         args.extend(std::iter::repeat_n(Felt252::ZERO, XMSS_TREE_HEIGHT));
     }
 }
@@ -627,13 +639,15 @@ mod tests {
     fn test_cairo_args_for_genesis_withdrawal() {
         let builder = genesis_builder();
         let args = builder.to_cairo_args(None, None).unwrap();
-        assert_eq!(args.len(), 254);
+        assert_eq!(args.len(), 256);
         assert_eq!(args[0], Felt252::from_u64(1));
         assert_eq!(args[9], Felt252::ZERO);
         assert_eq!(args[76], Felt252::ONE);
         assert_eq!(args[79], Felt252::ZERO);
-        assert_eq!(args[165], Felt252::ZERO);
-        assert_eq!(args[168], Felt252::ZERO);
+        assert_eq!(args[145], Felt252::ZERO);
+        assert_eq!(args[166], Felt252::ZERO);
+        assert_eq!(args[169], Felt252::ZERO);
+        assert_eq!(args[235], Felt252::ZERO);
     }
 
     #[test]

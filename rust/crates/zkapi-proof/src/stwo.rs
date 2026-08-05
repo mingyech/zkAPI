@@ -156,6 +156,7 @@ impl ScarbStwoProver {
 }
 
 fn write_arguments_file(cairo_args: &[Felt252]) -> Result<PathBuf, StwoBridgeError> {
+    // Cairo Serde encodes an Array as its length followed by its elements.
     let mut encoded = Vec::with_capacity(cairo_args.len() + 1);
     encoded.push(Felt252::from_u64(cairo_args.len() as u64).to_hex());
     encoded.extend(cairo_args.iter().map(Felt252::to_hex));
@@ -437,7 +438,7 @@ mod tests {
             &field_to_felt(&cy),
             &current_anchor,
         );
-        let (state_sig, state_root) = fixture_xmss_signature(&state_msg, 7, 10);
+        let (state_sig, state_root) = fixture_xmss_signature(&state_msg, 7, 10, 10);
         let builder = RequestProofBuilder::new(
             secret,
             note_id,
@@ -512,12 +513,12 @@ mod tests {
             &field_to_felt(&cy),
             &current_anchor,
         );
-        let (state_sig, state_root) = fixture_xmss_signature(&state_msg, 7, 20);
+        let (state_sig, state_root) = fixture_xmss_signature(&state_msg, 7, 10, 20);
         let withdrawal_nullifier =
             zkapi_core::nullifier::compute_nullifier(&secret, &current_anchor);
         let clear_msg =
             compute_clearance_message(1, 1, &Felt252::from_u64(0xdead), &withdrawal_nullifier);
-        let (clear_sig, clear_root) = fixture_xmss_signature(&clear_msg, 8, 40);
+        let (clear_sig, clear_root) = fixture_xmss_signature(&clear_msg, 8, 10, 40);
 
         let builder = WithdrawalProofBuilder::new(
             secret,
@@ -562,7 +563,7 @@ mod tests {
     }
 
     fn withdrawal_clearance_fields_start() -> usize {
-        79 + 1 + WOTS_LEN + XMSS_TREE_HEIGHT
+        79 + 1 + WOTS_LEN + 1 + XMSS_TREE_HEIGHT
     }
 
     fn cairo_dir() -> PathBuf {
@@ -588,12 +589,13 @@ mod tests {
     fn fixture_xmss_signature(
         message: &Felt252,
         epoch: u32,
+        height: usize,
         offset: u64,
     ) -> (XmssSignature, Felt252) {
         let wots_sig: Vec<Felt252> = (0..WOTS_LEN)
             .map(|i| Felt252::from_u64(offset + i as u64 + 1))
             .collect();
-        let auth_path = vec![Felt252::ZERO; XMSS_TREE_HEIGHT];
+        let auth_path = vec![Felt252::ZERO; height];
         let digest = xmss_hash_message(message);
         let mut sig_arr = [FieldElement::ZERO; WOTS_LEN];
         for (dst, src) in sig_arr.iter_mut().zip(wots_sig.iter()) {
