@@ -6,6 +6,7 @@
 //! wallet can always recover to a consistent point after a crash.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -102,7 +103,7 @@ impl NoteState {
 
         // Write to a sibling temp file, then atomically rename.
         let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, json.as_bytes())?;
+        write_private_file(&tmp_path, json.as_bytes())?;
         fs::rename(&tmp_path, path)?;
         Ok(())
     }
@@ -131,6 +132,24 @@ impl NoteState {
         }
         Ok(())
     }
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -220,6 +239,14 @@ mod tests {
         assert_eq!(loaded.note_id, 7);
         assert_eq!(loaded.current_balance, 5000);
         assert_eq!(loaded.balance_blinding, "0xff");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

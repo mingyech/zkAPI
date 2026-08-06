@@ -6,6 +6,7 @@
 //! resulting next state has been persisted atomically.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,7 @@ impl PendingRequestJournal {
         }
 
         let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, json.as_bytes())?;
+        write_private_file(&tmp_path, json.as_bytes())?;
         fs::rename(&tmp_path, path)?;
         Ok(())
     }
@@ -76,6 +77,24 @@ impl PendingRequestJournal {
     }
 }
 
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +123,14 @@ mod tests {
         let loaded = PendingRequestJournal::read(&path).unwrap().unwrap();
         assert_eq!(loaded.client_request_id, "test-uuid-1234");
         assert_eq!(loaded.nullifier, Felt252::from_u64(999));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

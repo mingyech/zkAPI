@@ -33,6 +33,24 @@ const G_BALANCE_Y: felt252 = 0x39289536a4fb4c04778f51eed313db47730cf86d342fd3f80
 const H_BLIND_X: felt252 = 0x9ed31288dc3e29f8759144b455aa05f39eee1a947e92fc1a9d71d15ed49faa;
 const H_BLIND_Y: felt252 = 0x73853a56a47d4dbeaf5c18ca78fbf64f414d5fccefaac0227d5c2654d2ca9b4;
 
+// Order of the Stark curve cyclic group. Blinding factors are scalars in
+// Z/nZ, not elements of the Stark base field.
+const EC_ORDER: u256 = 0x0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f_u256;
+
+/// Add two canonical blinding scalars modulo the Stark curve order.
+///
+/// Converting to u256 before addition preserves the carry that felt252
+/// addition would otherwise discard modulo the base-field prime.
+pub fn add_blinding(a: felt252, b: felt252) -> felt252 {
+    let sum: u256 = a.into() + b.into();
+    let reduced = if sum >= EC_ORDER {
+        sum - EC_ORDER
+    } else {
+        sum
+    };
+    reduced.try_into().expect('blinding exceeds felt')
+}
+
 fn point_double(is_inf: bool, x: felt252, y: felt252) -> (bool, felt252, felt252) {
     if is_inf {
         return (true, 0, 0);
@@ -127,7 +145,13 @@ pub fn verify_commitment_opening(px: felt252, py: felt252, balance: felt252, bli
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_commitment, verify_commitment_opening};
+    use super::{EC_ORDER, add_blinding, compute_commitment, verify_commitment_opening};
+
+    #[test]
+    fn test_blinding_addition_reduces_mod_curve_order() {
+        let n_minus_one: felt252 = (EC_ORDER - 1_u256).try_into().unwrap();
+        assert(add_blinding(n_minus_one, 2) == 1, 'wrong scalar reduction');
+    }
 
     #[test]
     fn test_commitment_matches_rust_vector() {

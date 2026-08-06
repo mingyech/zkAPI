@@ -151,7 +151,12 @@ impl ScarbStwoProver {
         let proof = std::fs::read(&proof_path)
             .map_err(|_| StwoBridgeError::MissingProofArtifact(display_path(&proof_path)))?;
 
-        Ok(ProofArtifact::stwo_cairo(public_output_hash, proof))
+        let artifact = ProofArtifact::stwo_cairo(public_output_hash, proof);
+        // Scarb verifies that the proof itself is valid, but callers also need
+        // the proof's public outputs bound to the Rust request inputs before
+        // they journal or transmit the request.
+        self.verify_artifact(&artifact)?;
+        Ok(artifact)
     }
 }
 

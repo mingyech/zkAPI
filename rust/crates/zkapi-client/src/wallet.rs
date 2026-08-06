@@ -19,7 +19,7 @@ use zkapi_core::leaf::compute_registration_commitment;
 use zkapi_core::nullifier::compute_nullifier;
 use zkapi_core::poseidon::{felt_to_field, field_to_felt};
 use zkapi_crypto::{
-    pedersen::{add_blinding, PedersenCommitment},
+    pedersen::{add_blinding, reduce_blinding, PedersenCommitment},
     xmss::XmssVerifier,
 };
 use zkapi_proof::{ProofArtifact, RequestProofBuilder, ScarbStwoProver, WithdrawalProofBuilder};
@@ -57,6 +57,11 @@ impl Wallet {
     pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
         let state_dir = PathBuf::from(&config.state_dir);
         std::fs::create_dir_all(&state_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
 
         let state_path = state_dir.join("note_state.json");
         let journal_path = state_dir.join("pending_journal.json");
@@ -946,7 +951,7 @@ fn sample_field_element(rng: &mut impl Rng) -> FieldElement {
     rng.fill(&mut bytes);
     // Clear the top bits to stay below the Stark prime (~2^251).
     bytes[0] &= 0x07;
-    FieldElement::from_bytes_be(&bytes)
+    reduce_blinding(&FieldElement::from_bytes_be(&bytes))
 }
 
 /// Parse a 0x-prefixed hex blinding factor into a `FieldElement`.

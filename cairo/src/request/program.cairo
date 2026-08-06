@@ -9,7 +9,7 @@ use core::poseidon::poseidon_hash_span;
 use zkapi_cairo::constants::{GENESIS_ANCHOR, PROTOCOL_VERSION, STATEMENT_TYPE_REQUEST};
 use zkapi_cairo::domains::{DOMAIN_LEAF, DOMAIN_NULL, DOMAIN_REG, DOMAIN_STATE};
 use zkapi_cairo::merkle::verify_merkle_path;
-use zkapi_cairo::pedersen_balance::compute_commitment;
+use zkapi_cairo::pedersen_balance::{add_blinding, compute_commitment};
 use zkapi_cairo::xmss::verify::verify_xmss;
 
 /// Execute the request proof program.
@@ -125,7 +125,7 @@ pub fn run_request_program(
     // 7. Anonymized commitment (rerandomized)
     //    anon_commitment = Commit(current_balance, current_blinding + user_rerandomization)
     // ---------------------------------------------------------------
-    let anon_blinding = current_blinding + user_rerandomization;
+    let anon_blinding = add_blinding(current_blinding, user_rerandomization);
     let (anon_x, anon_y) = compute_commitment(current_balance, anon_blinding);
 
     // ---------------------------------------------------------------
