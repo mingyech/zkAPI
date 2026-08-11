@@ -11,11 +11,13 @@
 //! while command execution still reports environment/toolchain failures at use
 //! time.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use sha3::{Digest, Keccak256};
 use thiserror::Error;
 use zkapi_types::{public_output_hash_from_cairo_outputs, Felt252};
 
@@ -87,7 +89,11 @@ impl ScarbStwoProver {
             public_output_hash,
             Some(args_path.as_path()),
         );
-        let _ = std::fs::remove_file(&args_path);
+        if keep_stwo_artifacts() {
+            tracing::info!(path = %display_path(&args_path), "preserving Stwo arguments file");
+        } else {
+            let _ = fs::remove_file(&args_path);
+        }
         result
     }
 
@@ -105,16 +111,7 @@ impl ScarbStwoProver {
 
     pub fn verify_artifact(&self, artifact: &ProofArtifact) -> Result<(), StwoBridgeError> {
         self.verify_proof_bytes(&artifact.proof)?;
-        let outputs = extract_public_outputs_from_proof(&artifact.proof)?;
-        let proof_hash = public_output_hash_from_cairo_outputs(&outputs)
-            .map_err(StwoBridgeError::PublicOutput)?;
-        if proof_hash != artifact.public_output_hash {
-            return Err(StwoBridgeError::PublicOutputHashMismatch {
-                artifact: artifact.public_output_hash,
-                proof: proof_hash,
-            });
-        }
-        Ok(())
+        verify_public_output_binding(artifact)
     }
 
     fn prove_and_verify_executable_inner(
@@ -123,7 +120,16 @@ impl ScarbStwoProver {
         public_output_hash: Felt252,
         arguments_file: Option<&Path>,
     ) -> Result<ProofArtifact, StwoBridgeError> {
-        let mut prove_args = vec!["prove", "--execute", "--executable-name", executable_name];
+        let total_started = Instant::now();
+        ensure_cairo_build(&self.cairo_dir, executable_name)?;
+
+        let mut prove_args = vec![
+            "prove",
+            "--execute",
+            "--no-build",
+            "--executable-name",
+            executable_name,
+        ];
         let arguments_file_display;
         if let Some(path) = arguments_file {
             arguments_file_display = display_path(path);
@@ -131,33 +137,176 @@ impl ScarbStwoProver {
             prove_args.push(&arguments_file_display);
         }
 
+        tracing::info!(executable = executable_name, "generating Stwo proof");
+        let prove_started = Instant::now();
         let prove_output = run_scarb(&self.cairo_dir, &prove_args)?;
         let execution_id =
             parse_execution_id(&prove_output).ok_or(StwoBridgeError::MissingExecutionId)?;
+        tracing::info!(
+            executable = executable_name,
+            elapsed_ms = prove_started.elapsed().as_millis(),
+            "generated Stwo proof"
+        );
 
-        run_scarb(
-            &self.cairo_dir,
-            &["verify", "--execution-id", &execution_id],
-        )?;
-
-        let proof_path = self
+        let execution_dir = self
             .cairo_dir
             .join("target")
             .join("execute")
             .join("zkapi_cairo")
-            .join(format!("execution{execution_id}"))
-            .join("proof")
-            .join("proof.json");
-        let proof = std::fs::read(&proof_path)
-            .map_err(|_| StwoBridgeError::MissingProofArtifact(display_path(&proof_path)))?;
+            .join(format!("execution{execution_id}"));
+        let result = (|| {
+            tracing::info!(execution_id, "verifying generated Stwo proof");
+            let verify_started = Instant::now();
+            run_scarb(
+                &self.cairo_dir,
+                &["verify", "--execution-id", &execution_id],
+            )?;
 
-        let artifact = ProofArtifact::stwo_cairo(public_output_hash, proof);
-        // Scarb verifies that the proof itself is valid, but callers also need
-        // the proof's public outputs bound to the Rust request inputs before
-        // they journal or transmit the request.
-        self.verify_artifact(&artifact)?;
-        Ok(artifact)
+            let proof_path = execution_dir.join("proof").join("proof.json");
+            let proof = fs::read(&proof_path)
+                .map_err(|_| StwoBridgeError::MissingProofArtifact(display_path(&proof_path)))?;
+            let artifact = ProofArtifact::stwo_cairo(public_output_hash, proof);
+
+            // Scarb verified the proof above. Bind its embedded public outputs
+            // to the Rust request before the caller journals or transmits it,
+            // without running the cryptographic verifier a second time.
+            verify_public_output_binding(&artifact)?;
+            tracing::info!(
+                execution_id,
+                elapsed_ms = verify_started.elapsed().as_millis(),
+                "verified generated Stwo proof"
+            );
+            Ok(artifact)
+        })();
+
+        if keep_stwo_artifacts() {
+            tracing::info!(path = %display_path(&execution_dir), "preserving Stwo execution artifacts");
+        } else if let Err(err) = fs::remove_dir_all(&execution_dir) {
+            tracing::warn!(
+                path = %display_path(&execution_dir),
+                error = %err,
+                "could not remove Stwo execution artifacts"
+            );
+        }
+
+        if result.is_ok() {
+            tracing::info!(
+                executable = executable_name,
+                elapsed_ms = total_started.elapsed().as_millis(),
+                "finished Stwo proof pipeline"
+            );
+        }
+        result
     }
+}
+
+fn verify_public_output_binding(artifact: &ProofArtifact) -> Result<(), StwoBridgeError> {
+    let outputs = extract_public_outputs_from_proof(&artifact.proof)?;
+    let proof_hash =
+        public_output_hash_from_cairo_outputs(&outputs).map_err(StwoBridgeError::PublicOutput)?;
+    if proof_hash != artifact.public_output_hash {
+        return Err(StwoBridgeError::PublicOutputHashMismatch {
+            artifact: artifact.public_output_hash,
+            proof: proof_hash,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_cairo_build(cairo_dir: &Path, executable_name: &str) -> Result<(), StwoBridgeError> {
+    let fingerprint = cairo_build_fingerprint(cairo_dir)?;
+    let target_dir = cairo_dir.join("target");
+    let marker_path = target_dir.join("zkapi-scarb-build-v1");
+    let executable_path = target_dir
+        .join("dev")
+        .join(format!("{executable_name}.executable.json"));
+    let cached = executable_path.is_file()
+        && fs::read_to_string(&marker_path)
+            .map(|value| value.trim() == fingerprint)
+            .unwrap_or(false);
+    if cached {
+        tracing::info!(executable = executable_name, "using cached Cairo build");
+        return Ok(());
+    }
+
+    tracing::info!(executable = executable_name, "building Cairo executables");
+    let started = Instant::now();
+    run_scarb(cairo_dir, &["build"])?;
+    fs::create_dir_all(&target_dir).map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+    fs::write(&marker_path, format!("{fingerprint}\n"))
+        .map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+    tracing::info!(
+        executable = executable_name,
+        elapsed_ms = started.elapsed().as_millis(),
+        "built Cairo executables"
+    );
+    Ok(())
+}
+
+fn cairo_build_fingerprint(cairo_dir: &Path) -> Result<String, StwoBridgeError> {
+    let version = Command::new("scarb")
+        .arg("--version")
+        .current_dir(cairo_dir)
+        .output()
+        .map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+    if !version.status.success() {
+        return Err(StwoBridgeError::ScarbCommandFailed(
+            String::from_utf8_lossy(&version.stderr).into_owned(),
+        ));
+    }
+
+    let mut inputs = Vec::new();
+    collect_cairo_build_inputs(cairo_dir, cairo_dir, &mut inputs)?;
+    inputs.sort();
+
+    let mut hasher = Keccak256::new();
+    hasher.update(&version.stdout);
+    for path in inputs {
+        let relative = path.strip_prefix(cairo_dir).unwrap_or(&path);
+        hasher.update(relative.to_string_lossy().as_bytes());
+        let bytes = fs::read(&path).map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn collect_cairo_build_inputs(
+    root: &Path,
+    dir: &Path,
+    inputs: &mut Vec<PathBuf>,
+) -> Result<(), StwoBridgeError> {
+    for entry in fs::read_dir(dir).map_err(|err| StwoBridgeError::Io(err.to_string()))? {
+        let entry = entry.map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|err| StwoBridgeError::Io(err.to_string()))?;
+        if file_type.is_dir() {
+            if path != root.join("target") && path != root.join(".git") {
+                collect_cairo_build_inputs(root, &path, inputs)?;
+            }
+            continue;
+        }
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let is_manifest = matches!(file_name, Some("Scarb.toml" | "Scarb.lock"));
+        let is_cairo = path.extension().and_then(|ext| ext.to_str()) == Some("cairo");
+        if is_manifest || is_cairo {
+            inputs.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn keep_stwo_artifacts() -> bool {
+    std::env::var("ZKAPI_KEEP_STWO_ARTIFACTS")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn write_arguments_file(cairo_args: &[Felt252]) -> Result<PathBuf, StwoBridgeError> {

@@ -7,7 +7,9 @@
 //   len2 = 3
 //   len  = 65
 
+use core::num::traits::DivRem;
 use core::poseidon::poseidon_hash_span;
+use core::zeroable::NonZero;
 use zkapi_cairo::constants::WOTS_W;
 use zkapi_cairo::domains::{DOMAIN_XMSS_CHAIN, DOMAIN_XMSS_LEAF};
 
@@ -54,26 +56,28 @@ pub fn message_to_base_w(message: felt252) -> Array<u32> {
     let msg_u256: u256 = message.into();
     let mut remaining = msg_u256;
 
-    // Extract 62 nibbles from the most significant end.
-    // The message is 248 bits = 62 nibbles.
-    // Nibble 0 is bits [247..244], nibble 61 is bits [3..0].
+    // Extract one base-16 digit per division, starting at the least
+    // significant end. This is linear in the number of digits; rebuilding
+    // 2^shift for every digit made the old implementation quadratic.
     let mut i: u32 = 0;
-    let mut nibbles: Array<u32> = array![];
+    let mut lsb_nibbles: Array<u32> = array![];
+    let sixteen: NonZero<u256> = 16_u256.try_into().unwrap();
     while i < 62 {
-        // Shift index: for nibble i, shift right by (61 - i) * 4 bits
-        let shift_amount: u32 = (61 - i) * 4;
-        let shifted = shr_u256(remaining, shift_amount);
-        let nibble: u32 = (shifted & 0xF_u256).try_into().unwrap();
-        nibbles.append(nibble);
+        let (next_remaining, digit) = DivRem::div_rem(remaining, sixteen);
+        lsb_nibbles.append(digit.try_into().unwrap());
+        remaining = next_remaining;
         i += 1;
     }
 
-    // Compute checksum = sum of (w - 1 - digit) for all message digits.
+    // WOTS consumes digits most-significant first. Build the output and its
+    // checksum in one pass instead of copying the digits twice more.
     let mut checksum: u32 = 0;
-    let mut j: u32 = 0;
-    while j < 62 {
-        checksum += (WOTS_W - 1) - *nibbles.at(j);
-        j += 1;
+    let mut i: u32 = 0;
+    while i < 62 {
+        let digit = *lsb_nibbles.at(61 - i);
+        digits.append(digit);
+        checksum += (WOTS_W - 1) - digit;
+        i += 1;
     }
 
     // Decompose checksum into WOTS_LEN2 = 3 base-16 digits (MSB first).
@@ -82,12 +86,7 @@ pub fn message_to_base_w(message: felt252) -> Array<u32> {
     let cs_digit_1: u32 = (checksum % 256) / 16;
     let cs_digit_0: u32 = checksum % 16;
 
-    // Build result: message digits followed by checksum digits.
-    let mut k: u32 = 0;
-    while k < 62 {
-        digits.append(*nibbles.at(k));
-        k += 1;
-    }
+    // Append checksum digits.
     digits.append(cs_digit_2);
     digits.append(cs_digit_1);
     digits.append(cs_digit_0);
@@ -135,26 +134,4 @@ pub fn wots_pk_to_leaf(pk_values: Span<felt252>) -> felt252 {
         i += 1;
     }
     poseidon_hash_span(preimage.span())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Logical right shift for u256.
-fn shr_u256(value: u256, shift: u32) -> u256 {
-    if shift == 0 {
-        return value;
-    }
-    if shift >= 256 {
-        return 0_u256;
-    }
-    // Cairo 2 supports u256 division.  Shifting right by n is dividing by 2^n.
-    let mut divisor: u256 = 1;
-    let mut i: u32 = 0;
-    while i < shift {
-        divisor = divisor * 2;
-        i += 1;
-    }
-    value / divisor
 }

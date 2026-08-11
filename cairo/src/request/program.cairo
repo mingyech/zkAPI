@@ -9,7 +9,7 @@ use core::poseidon::poseidon_hash_span;
 use zkapi_cairo::constants::{GENESIS_ANCHOR, PROTOCOL_VERSION, STATEMENT_TYPE_REQUEST};
 use zkapi_cairo::domains::{DOMAIN_LEAF, DOMAIN_NULL, DOMAIN_REG, DOMAIN_STATE};
 use zkapi_cairo::merkle::verify_merkle_path;
-use zkapi_cairo::pedersen_balance::{add_blinding, compute_commitment};
+use zkapi_cairo::pedersen_balance::{add_blinding, compute_commitment, rerandomize_commitment};
 use zkapi_cairo::xmss::verify::verify_xmss;
 
 /// Execute the request proof program.
@@ -87,12 +87,19 @@ pub fn run_request_program(
     // ---------------------------------------------------------------
     assert(is_genesis == 0 || is_genesis == 1, 'is_genesis must be bool');
 
-    if is_genesis == 1 {
+    // ---------------------------------------------------------------
+    // 7. Anonymized commitment (rerandomized)
+    //    anon_commitment = Commit(current_balance, current_blinding + user_rerandomization)
+    // ---------------------------------------------------------------
+    let (anon_x, anon_y) = if is_genesis == 1 {
         // Genesis path
         assert(current_anchor == GENESIS_ANCHOR, 'genesis anchor must be 1');
         assert(current_balance == deposit_amount, 'genesis balance != deposit');
         assert(state_sig_epoch == 0, 'genesis epoch must be 0');
         assert(state_sig_root == 0, 'genesis sig root must be 0');
+
+        let anon_blinding = add_blinding(current_blinding, user_rerandomization);
+        compute_commitment(current_balance, anon_blinding)
     } else {
         // Non-genesis: verify state signature
         let (e_x, e_y) = compute_commitment(current_balance, current_blinding);
@@ -111,7 +118,9 @@ pub fn run_request_program(
         );
 
         verify_xmss(state_sig_root, m_state, state_sig_leaf_index, wots_sig, auth_path);
-    }
+
+        rerandomize_commitment(e_x, e_y, user_rerandomization)
+    };
 
     // ---------------------------------------------------------------
     // 6. Nullifier
@@ -121,14 +130,6 @@ pub fn run_request_program(
         array![DOMAIN_NULL, secret_s, current_anchor].span(),
     );
 
-    // ---------------------------------------------------------------
-    // 7. Anonymized commitment (rerandomized)
-    //    anon_commitment = Commit(current_balance, current_blinding + user_rerandomization)
-    // ---------------------------------------------------------------
-    let anon_blinding = add_blinding(current_blinding, user_rerandomization);
-    let (anon_x, anon_y) = compute_commitment(current_balance, anon_blinding);
-
-    // ---------------------------------------------------------------
     // 8. Solvency bound
     //    current_balance >= solvency_bound
     //

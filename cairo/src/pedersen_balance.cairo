@@ -90,7 +90,9 @@ fn point_add(
     (false, x3, y3)
 }
 
-fn scalar_mul(point_x: felt252, point_y: felt252, scalar: felt252) -> (bool, felt252, felt252) {
+fn scalar_mul(
+    point_x: felt252, point_y: felt252, scalar: felt252, scalar_bits: u32,
+) -> (bool, felt252, felt252) {
     let mut result_inf = true;
     let mut result_x = 0;
     let mut result_y = 0;
@@ -101,9 +103,44 @@ fn scalar_mul(point_x: felt252, point_y: felt252, scalar: felt252) -> (bool, fel
     let two: NonZero<u256> = 2_u256.try_into().unwrap();
     let mut i: u32 = 0;
 
-    while i < 252 {
+    while i < scalar_bits {
         let (next_remaining, bit) = DivRem::div_rem(remaining, two);
         if bit == 1_u256 {
+            let (sum_inf, sum_x, sum_y) = point_add(
+                result_inf, result_x, result_y, addend_inf, addend_x, addend_y,
+            );
+            result_inf = sum_inf;
+            result_x = sum_x;
+            result_y = sum_y;
+        }
+
+        let (double_inf, double_x, double_y) = point_double(addend_inf, addend_x, addend_y);
+        addend_inf = double_inf;
+        addend_x = double_x;
+        addend_y = double_y;
+        remaining = next_remaining;
+        i += 1;
+    }
+
+    (result_inf, result_x, result_y)
+}
+
+fn scalar_mul_balance(
+    point_x: felt252, point_y: felt252, scalar: u128,
+) -> (bool, felt252, felt252) {
+    let mut result_inf = true;
+    let mut result_x = 0;
+    let mut result_y = 0;
+    let mut addend_inf = false;
+    let mut addend_x = point_x;
+    let mut addend_y = point_y;
+    let mut remaining = scalar;
+    let two: NonZero<u128> = 2_u128.try_into().unwrap();
+    let mut i: u32 = 0;
+
+    while i < 128 {
+        let (next_remaining, bit) = DivRem::div_rem(remaining, two);
+        if bit == 1 {
             let (sum_inf, sum_x, sum_y) = point_add(
                 result_inf, result_x, result_y, addend_inf, addend_x, addend_y,
             );
@@ -128,9 +165,28 @@ fn scalar_mul(point_x: felt252, point_y: felt252, scalar: felt252) -> (bool, fel
 /// Returns the commitment as an (x, y) pair.
 /// Panics if the resulting point is the point at infinity.
 pub fn compute_commitment(balance: felt252, blinding: felt252) -> (felt252, felt252) {
-    let (g_inf, g_x, g_y) = scalar_mul(G_BALANCE_X, G_BALANCE_Y, balance);
-    let (h_inf, h_x, h_y) = scalar_mul(H_BLIND_X, H_BLIND_Y, blinding);
+    // Protocol balances are u128 values, so fixed 128-bit multiplication is
+    // sufficient and avoids 124 provably-zero rounds. Blinding factors span
+    // the full Stark-curve scalar field.
+    let balance_u128: u128 = balance.try_into().expect('balance exceeds u128');
+    let (g_inf, g_x, g_y) = scalar_mul_balance(G_BALANCE_X, G_BALANCE_Y, balance_u128);
+    let (h_inf, h_x, h_y) = scalar_mul(H_BLIND_X, H_BLIND_Y, blinding, 252);
     let (result_inf, result_x, result_y) = point_add(g_inf, g_x, g_y, h_inf, h_x, h_y);
+    assert(!result_inf, 'commitment is infinity');
+    (result_x, result_y)
+}
+
+/// Rerandomize an existing balance commitment by adding `delta * H_blind`.
+/// This is algebraically identical to recomputing the commitment with
+/// `blinding + delta`, without repeating the balance and current-blinding
+/// scalar multiplications.
+pub fn rerandomize_commitment(
+    commitment_x: felt252, commitment_y: felt252, delta: felt252,
+) -> (felt252, felt252) {
+    let (delta_inf, delta_x, delta_y) = scalar_mul(H_BLIND_X, H_BLIND_Y, delta, 252);
+    let (result_inf, result_x, result_y) = point_add(
+        false, commitment_x, commitment_y, delta_inf, delta_x, delta_y,
+    );
     assert(!result_inf, 'commitment is infinity');
     (result_x, result_y)
 }
@@ -145,7 +201,10 @@ pub fn verify_commitment_opening(px: felt252, py: felt252, balance: felt252, bli
 
 #[cfg(test)]
 mod tests {
-    use super::{EC_ORDER, add_blinding, compute_commitment, verify_commitment_opening};
+    use super::{
+        EC_ORDER, add_blinding, compute_commitment, rerandomize_commitment,
+        verify_commitment_opening,
+    };
 
     #[test]
     fn test_blinding_addition_reduces_mod_curve_order() {
@@ -170,5 +229,14 @@ mod tests {
     fn test_verify_opening_roundtrip() {
         let (x, y) = compute_commitment(77, 5);
         verify_commitment_opening(x, y, 77, 5);
+    }
+
+    #[test]
+    fn test_rerandomization_matches_full_commitment() {
+        let (x, y) = compute_commitment(77, 5);
+        let (rerandomized_x, rerandomized_y) = rerandomize_commitment(x, y, 7);
+        let (expected_x, expected_y) = compute_commitment(77, add_blinding(5, 7));
+        assert(rerandomized_x == expected_x, 'rerandomized x mismatch');
+        assert(rerandomized_y == expected_y, 'rerandomized y mismatch');
     }
 }
