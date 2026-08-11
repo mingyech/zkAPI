@@ -13,150 +13,75 @@ import {MerkleUpdateLib} from "./libraries/MerkleUpdateLib.sol";
 import {NoteLeafLib} from "./libraries/NoteLeafLib.sol";
 import {IZkApiProofAdapter} from "./interfaces/IZkApiProofAdapter.sol";
 
-/// @title ZkApiVault – On-chain settlement contract for zkAPI v1
-/// @notice Manages note deposits, mutual closes, escape-hatch withdrawals,
-///         challenges, expiry claims, and server signing-root epochs.
+/// @title ZkApiVault
+/// @notice zkAPI v2 settlement with in-protocol BN254 Groth16 verification.
 contract ZkApiVault is ReentrancyGuard, Ownable, Events {
     using SafeERC20 for IERC20;
 
-    // -----------------------------------------------------------------------
-    //  Constants
-    // -----------------------------------------------------------------------
-
-    /// @notice Protocol version pinned for this deployment.
-    uint16 public constant PROTOCOL_VERSION = 1;
-
-    /// @notice Challenge period for escape-hatch withdrawals.
+    uint16 public constant PROTOCOL_VERSION = 2;
     uint64 public constant CHALLENGE_PERIOD = 24 hours;
-
-    /// @notice Merkle tree depth (mirrored from MerkleUpdateLib for convenience).
+    uint64 public constant EXPIRY_BUCKET = 1 days;
     uint256 public constant MERKLE_DEPTH = 32;
 
-    // -----------------------------------------------------------------------
-    //  Immutable deployment parameters
-    // -----------------------------------------------------------------------
-
-    /// @notice The ERC20 token used for billing.
     IERC20 public immutable billingToken;
-
-    /// @notice Time-to-live for notes, in seconds, added to block.timestamp at deposit.
     uint64 public immutable noteTtl;
-
-    /// @notice Maximum per-request charge (informational, enforced in Cairo).
     uint128 public immutable requestChargeCap;
+    IZkApiProofAdapter public immutable proofAdapter;
+    uint256 public immutable stateSigningKeyX;
+    uint256 public immutable stateSigningKeyY;
+    uint256 public immutable clearanceSigningKeyX;
+    uint256 public immutable clearanceSigningKeyY;
 
-    /// @notice Maximum per-policy charge (informational, enforced in Cairo).
-    uint128 public immutable policyChargeCap;
-
-    /// @notice Whether policy-based charges are enabled.
-    bool public immutable policyEnabled;
-
-    // -----------------------------------------------------------------------
-    //  Configurable state (owner-controlled)
-    // -----------------------------------------------------------------------
-
-    /// @notice Address of the proof-verification adapter.
-    address public proofAdapter;
-
-    /// @notice Address that receives the operator's share of closed notes.
     address public treasury;
-
-    /// @notice Emergency pause flag.
     bool public paused;
-
-    // -----------------------------------------------------------------------
-    //  Merkle & note state
-    // -----------------------------------------------------------------------
-
-    /// @notice Current Merkle root of the active-note tree.
     uint256 public currentRoot;
-
-    /// @notice Next note index to allocate on deposit.
     uint32 public nextNoteId;
 
-    /// @notice Note metadata by noteId.
     mapping(uint32 => Types.Note) public notes;
-
-    /// @notice Pending escape-hatch withdrawal data by noteId.
     mapping(uint32 => Types.PendingWithdrawalData) public pendingWithdrawals;
-
-    // -----------------------------------------------------------------------
-    //  XMSS epoch state
-    // -----------------------------------------------------------------------
-
-    /// @notice The latest published epoch number.
-    uint32 public currentEpoch;
-
-    /// @notice State-signature XMSS root by epoch.
-    mapping(uint32 => uint256) public stateSigRootByEpoch;
-
-    /// @notice Clearance-signature XMSS root by epoch.
-    mapping(uint32 => uint256) public clearSigRootByEpoch;
-
-    // -----------------------------------------------------------------------
-    //  Nullifier set
-    // -----------------------------------------------------------------------
-
-    /// @notice Tracks consumed nullifiers to prevent replay.
     mapping(uint256 => bool) public usedNullifiers;
 
-    // -----------------------------------------------------------------------
-    //  Modifiers
-    // -----------------------------------------------------------------------
-
     modifier whenNotPaused() {
-        _whenNotPaused();
+        if (paused) revert Errors.Paused();
         _;
     }
 
-    function _whenNotPaused() internal view {
-        if (paused) revert Errors.Paused();
-    }
-
-    // -----------------------------------------------------------------------
-    //  Constructor
-    // -----------------------------------------------------------------------
-
-    /// @param _billingToken    ERC20 token for note deposits.
-    /// @param _treasury        Initial treasury address.
-    /// @param _noteTtl         Note time-to-live in seconds.
-    /// @param _requestChargeCap  Maximum per-request charge.
-    /// @param _policyChargeCap   Maximum per-policy charge.
-    /// @param _policyEnabled     Whether policy charges are active.
-    /// @param _proofAdapter      Initial proof adapter address.
-    /// @param _owner             Contract owner (for Ownable).
     constructor(
-        address _billingToken,
-        address _treasury,
-        uint64 _noteTtl,
-        uint128 _requestChargeCap,
-        uint128 _policyChargeCap,
-        bool _policyEnabled,
-        address _proofAdapter,
-        address _owner
-    ) Ownable(_owner) {
-        billingToken = IERC20(_billingToken);
-        treasury = _treasury;
-        noteTtl = _noteTtl;
-        requestChargeCap = _requestChargeCap;
-        policyChargeCap = _policyChargeCap;
-        policyEnabled = _policyEnabled;
-        proofAdapter = _proofAdapter;
+        address billingToken_,
+        address treasury_,
+        uint64 noteTtl_,
+        uint128 requestChargeCap_,
+        address proofAdapter_,
+        uint256 stateSigningKeyX_,
+        uint256 stateSigningKeyY_,
+        uint256 clearanceSigningKeyX_,
+        uint256 clearanceSigningKeyY_,
+        address owner_
+    ) Ownable(owner_) {
+        if (billingToken_ == address(0) || treasury_ == address(0) || proofAdapter_ == address(0)) {
+            revert Errors.Unauthorized();
+        }
+        _requireField(stateSigningKeyX_);
+        _requireField(stateSigningKeyY_);
+        _requireField(clearanceSigningKeyX_);
+        _requireField(clearanceSigningKeyY_);
+        if (
+            (stateSigningKeyX_ == 0 && stateSigningKeyY_ == 0)
+                || (clearanceSigningKeyX_ == 0 && clearanceSigningKeyY_ == 0)
+        ) revert Errors.InvalidDeploymentBinding();
 
-        // The initial root is the root of an all-zero tree.
-        // For a tree of depth 32 with zero leaves, the root is computed
-        // iteratively: level 0 = 0, level i+1 = H(level_i, level_i).
+        billingToken = IERC20(billingToken_);
+        treasury = treasury_;
+        noteTtl = noteTtl_;
+        requestChargeCap = requestChargeCap_;
+        proofAdapter = IZkApiProofAdapter(proofAdapter_);
+        stateSigningKeyX = stateSigningKeyX_;
+        stateSigningKeyY = stateSigningKeyY_;
+        clearanceSigningKeyX = clearanceSigningKeyX_;
+        clearanceSigningKeyY = clearanceSigningKeyY_;
         currentRoot = _computeEmptyTreeRoot();
     }
 
-    // -----------------------------------------------------------------------
-    //  Deposit
-    // -----------------------------------------------------------------------
-
-    /// @notice Deposit tokens and create a new note.
-    /// @param commitment  Registration commitment C (must be < STARK_FIELD_PRIME and != 0).
-    /// @param amount      Deposit amount in token base units (must be > 0).
-    /// @param siblings    Merkle sibling path for the new note's leaf slot.
     function deposit(bytes32 commitment, uint128 amount, uint256[32] calldata siblings)
         external
         nonReentrant
@@ -164,392 +89,193 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
     {
         if (amount == 0) revert Errors.ZeroAmount();
         if (commitment == bytes32(0)) revert Errors.InvalidCommitment();
-        if (uint256(commitment) >= MerkleUpdateLib.STARK_FIELD_PRIME) revert Errors.InvalidFelt();
+        _requireField(uint256(commitment));
 
         uint32 noteId = nextNoteId;
-        uint64 expiryTs = uint64(block.timestamp) + noteTtl;
-
-        // Compute the new leaf.
+        uint256 rawExpiry = block.timestamp + noteTtl;
+        uint256 bucketedExpiry = ((rawExpiry + EXPIRY_BUCKET - 1) / EXPIRY_BUCKET) * EXPIRY_BUCKET;
+        if (bucketedExpiry > type(uint64).max) revert Errors.InvalidFelt();
+        uint64 expiryTs = uint64(bucketedExpiry);
         uint256 newLeaf = NoteLeafLib.computeLeaf(noteId, commitment, amount, expiryTs);
+        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(currentRoot, noteId, 0, newLeaf, siblings);
 
-        // Verify current root has zero leaf at noteId, then compute new root.
-        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(
-            currentRoot,
-            noteId,
-            0, // old leaf is zero (empty slot)
-            newLeaf,
-            siblings
-        );
-
-        // Effects
         currentRoot = newRoot;
-        notes[noteId] = Types.Note({
-            commitment: commitment, depositAmount: amount, expiryTs: expiryTs, status: Types.NoteStatus.Active
-        });
+        notes[noteId] = Types.Note(commitment, amount, expiryTs, Types.NoteStatus.Active);
         nextNoteId = noteId + 1;
-
-        // Interactions
-        billingToken.safeTransferFrom(msg.sender, address(this), uint256(amount));
-
+        billingToken.safeTransferFrom(msg.sender, address(this), amount);
         emit NoteDeposited(noteId, commitment, amount, expiryTs, newRoot);
     }
 
-    // -----------------------------------------------------------------------
-    //  Mutual Close
-    // -----------------------------------------------------------------------
-
-    /// @notice Close a note cooperatively with server clearance.
-    /// @param inputs        Withdrawal proof public inputs.
-    /// @param proofEnvelope Proof data for the adapter.
-    /// @param siblings      Merkle sibling path.
     function mutualClose(
         Types.WithdrawalPublicInputs calldata inputs,
-        bytes calldata proofEnvelope,
+        bytes calldata proof,
         uint256[32] calldata siblings
     ) external nonReentrant whenNotPaused {
-        // Verify proof via adapter
-        IZkApiProofAdapter(proofAdapter).assertValidWithdrawal(inputs, proofEnvelope);
-
-        // Validate statement type
-        if (inputs.statementType != 2) revert Errors.InvalidStatementType();
-
-        // Must have clearance for mutual close
-        if (!inputs.hasClearance) revert Errors.InvalidStatementType();
-
-        // Root freshness
+        _validateWithdrawalBinding(inputs);
+        if (!inputs.hasClearance) revert Errors.InvalidDeploymentBinding();
         if (inputs.activeRoot != currentRoot) revert Errors.StaleRoot();
-
-        uint32 noteId = inputs.noteId;
-        Types.Note storage note = notes[noteId];
-
-        // Note must be active
-        if (note.status != Types.NoteStatus.Active) revert Errors.NoteNotActive();
-
-        // Validate server signature roots
-        _validateStateSigRoot(inputs.isGenesis, inputs.stateSigEpoch, inputs.stateSigRoot);
-        _validateClearSigRoot(inputs.clearSigEpoch, inputs.clearSigRoot);
-
-        // Balance check
-        if (inputs.finalBalance > note.depositAmount) revert Errors.InvalidBalance();
-
-        // Nullifier replay check
-        if (usedNullifiers[inputs.withdrawalNullifier]) revert Errors.ReplayedNullifier();
-        usedNullifiers[inputs.withdrawalNullifier] = true;
-
-        // Compute the old leaf and zero it out
-        uint256 oldLeaf = NoteLeafLib.computeLeaf(noteId, note.commitment, note.depositAmount, note.expiryTs);
-        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(
-            currentRoot,
-            noteId,
-            oldLeaf,
-            0, // zero out the leaf
-            siblings
-        );
-
-        // Effects
-        currentRoot = newRoot;
-        note.status = Types.NoteStatus.Closed;
-
-        // Interactions: pay user then treasury
-        uint128 finalBalance = inputs.finalBalance;
-        address destination = inputs.destination;
-        uint128 operatorShare = note.depositAmount - finalBalance;
-
-        if (finalBalance > 0) {
-            billingToken.safeTransfer(destination, uint256(finalBalance));
-        }
-        if (operatorShare > 0) {
-            billingToken.safeTransfer(treasury, uint256(operatorShare));
-        }
-
-        emit MutualClose(noteId, inputs.withdrawalNullifier, finalBalance, destination);
+        proofAdapter.assertValidWithdrawal(inputs, proof);
+        _closeActive(inputs, siblings);
+        emit MutualClose(inputs.noteId, inputs.withdrawalNullifier, inputs.finalBalance, inputs.destination);
     }
 
-    // -----------------------------------------------------------------------
-    //  Escape-Hatch Withdrawal: Initiate
-    // -----------------------------------------------------------------------
-
-    /// @notice Begin an escape-hatch withdrawal (no server clearance).
-    /// @param inputs        Withdrawal proof public inputs.
-    /// @param proofEnvelope Proof data for the adapter.
-    /// @param siblings      Merkle sibling path.
     function initiateEscapeWithdrawal(
         Types.WithdrawalPublicInputs calldata inputs,
-        bytes calldata proofEnvelope,
+        bytes calldata proof,
         uint256[32] calldata siblings
     ) external nonReentrant whenNotPaused {
-        // Verify proof via adapter
-        IZkApiProofAdapter(proofAdapter).assertValidWithdrawal(inputs, proofEnvelope);
-
-        // Validate statement type
-        if (inputs.statementType != 2) revert Errors.InvalidStatementType();
-
-        // Escape hatch: no clearance
-        if (inputs.hasClearance) revert Errors.InvalidStatementType();
-
-        // Root freshness
+        _validateWithdrawalBinding(inputs);
+        if (inputs.hasClearance) revert Errors.InvalidDeploymentBinding();
         if (inputs.activeRoot != currentRoot) revert Errors.StaleRoot();
+        proofAdapter.assertValidWithdrawal(inputs, proof);
 
-        uint32 noteId = inputs.noteId;
-        Types.Note storage note = notes[noteId];
-
-        // Note must be active
+        Types.Note storage note = notes[inputs.noteId];
         if (note.status != Types.NoteStatus.Active) revert Errors.NoteNotActive();
-
-        // Validate state signature root (clearance not needed for escape)
-        _validateStateSigRoot(inputs.isGenesis, inputs.stateSigEpoch, inputs.stateSigRoot);
-
-        // Balance check
         if (inputs.finalBalance > note.depositAmount) revert Errors.InvalidBalance();
+        _consumeNullifier(inputs.withdrawalNullifier);
 
-        // Nullifier replay check
-        if (usedNullifiers[inputs.withdrawalNullifier]) revert Errors.ReplayedNullifier();
-        usedNullifiers[inputs.withdrawalNullifier] = true;
-
-        // Compute old leaf and zero it immediately to freeze the note
-        uint256 oldLeaf = NoteLeafLib.computeLeaf(noteId, note.commitment, note.depositAmount, note.expiryTs);
-        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(currentRoot, noteId, oldLeaf, 0, siblings);
-
-        uint64 challengeDeadline = uint64(block.timestamp) + CHALLENGE_PERIOD;
-
-        // Effects
+        uint256 oldRoot = currentRoot;
+        uint256 leaf = _leaf(inputs.noteId, note);
+        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(oldRoot, inputs.noteId, leaf, 0, siblings);
+        uint64 deadline = uint64(block.timestamp) + CHALLENGE_PERIOD;
         currentRoot = newRoot;
         note.status = Types.NoteStatus.PendingWithdrawal;
-        pendingWithdrawals[noteId] = Types.PendingWithdrawalData({
+        pendingWithdrawals[inputs.noteId] = Types.PendingWithdrawalData({
             exists: true,
+            activeRoot: oldRoot,
             withdrawalNullifier: inputs.withdrawalNullifier,
             finalBalance: inputs.finalBalance,
             destination: inputs.destination,
-            challengeDeadline: challengeDeadline
+            challengeDeadline: deadline
         });
-
         emit EscapeWithdrawalInitiated(
-            noteId, inputs.withdrawalNullifier, inputs.finalBalance, inputs.destination, challengeDeadline, newRoot
+            inputs.noteId, inputs.withdrawalNullifier, inputs.finalBalance, inputs.destination, deadline, newRoot
         );
     }
 
-    // -----------------------------------------------------------------------
-    //  Escape-Hatch Withdrawal: Challenge
-    // -----------------------------------------------------------------------
-
-    /// @notice Challenge an escape-hatch withdrawal by presenting a more recent
-    ///         request proof whose nullifier matches the pending withdrawal.
-    /// @param noteId        The note under pending withdrawal.
-    /// @param inputs        Request proof public inputs.
-    /// @param proofEnvelope Proof data for the adapter.
-    /// @param siblings      Merkle sibling path to restore the original leaf.
     function challengeEscapeWithdrawal(
         uint32 noteId,
         Types.RequestPublicInputs calldata inputs,
-        bytes calldata proofEnvelope,
+        bytes calldata proof,
         uint256[32] calldata siblings
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         Types.Note storage note = notes[noteId];
         Types.PendingWithdrawalData storage pending = pendingWithdrawals[noteId];
-
-        // Note must be pending withdrawal
-        if (note.status != Types.NoteStatus.PendingWithdrawal) revert Errors.NotPendingWithdrawal();
-
-        // Must be within challenge period
-        if (block.timestamp >= pending.challengeDeadline) revert Errors.ChallengeExpired();
-
-        // Verify request proof via adapter
-        IZkApiProofAdapter(proofAdapter).assertValidRequest(inputs, proofEnvelope);
-
-        // Validate statement type
-        if (inputs.statementType != 1) revert Errors.InvalidStatementType();
-
-        // Validate state signature root
-        // For request proofs, stateSigEpoch == 0 && stateSigRoot == 0 is the genesis encoding
-        if (inputs.stateSigEpoch != 0) {
-            uint256 storedRoot = stateSigRootByEpoch[inputs.stateSigEpoch];
-            if (storedRoot == 0) revert Errors.EpochNotFound();
-            if (storedRoot != inputs.stateSigRoot) revert Errors.EpochNotFound();
+        if (note.status != Types.NoteStatus.PendingWithdrawal || !pending.exists) {
+            revert Errors.NotPendingWithdrawal();
         }
-
-        // The request nullifier must match the pending withdrawal nullifier
+        if (block.timestamp >= pending.challengeDeadline) revert Errors.ChallengeExpired();
+        _validateRequestBinding(inputs);
+        if (inputs.activeRoot != pending.activeRoot) revert Errors.StaleRoot();
         if (inputs.requestNullifier != pending.withdrawalNullifier) revert Errors.ReplayedNullifier();
+        proofAdapter.assertValidRequest(inputs, proof);
 
-        // The current root should have zero at the note leaf (it was zeroed during initiation).
-        // Restore the original leaf.
-        uint256 originalLeaf = NoteLeafLib.computeLeaf(noteId, note.commitment, note.depositAmount, note.expiryTs);
-        uint256 restoredRoot = MerkleUpdateLib.verifyAndUpdate(
-            currentRoot,
-            noteId,
-            0, // currently zero
-            originalLeaf,
-            siblings
-        );
-
-        // Effects
+        uint256 restoredRoot = MerkleUpdateLib.verifyAndUpdate(currentRoot, noteId, 0, _leaf(noteId, note), siblings);
+        uint256 nullifier = pending.withdrawalNullifier;
         currentRoot = restoredRoot;
         note.status = Types.NoteStatus.Active;
-
-        // Clear pending withdrawal data
-        uint256 nullifier = pending.withdrawalNullifier;
         delete pendingWithdrawals[noteId];
-
         emit EscapeWithdrawalChallenged(noteId, nullifier, restoredRoot);
     }
 
-    // -----------------------------------------------------------------------
-    //  Escape-Hatch Withdrawal: Finalize
-    // -----------------------------------------------------------------------
-
-    /// @notice Finalize an escape-hatch withdrawal after the challenge period.
-    /// @param noteId The note to finalize.
-    function finalizeEscapeWithdrawal(uint32 noteId) external nonReentrant whenNotPaused {
+    function finalizeEscapeWithdrawal(uint32 noteId) external nonReentrant {
         Types.Note storage note = notes[noteId];
         Types.PendingWithdrawalData storage pending = pendingWithdrawals[noteId];
-
-        // Note must be pending withdrawal
-        if (note.status != Types.NoteStatus.PendingWithdrawal) revert Errors.NotPendingWithdrawal();
-
-        // Challenge period must have elapsed
+        if (note.status != Types.NoteStatus.PendingWithdrawal || !pending.exists) {
+            revert Errors.NotPendingWithdrawal();
+        }
         if (block.timestamp < pending.challengeDeadline) revert Errors.ChallengeNotExpired();
 
-        // Cache before clearing
         uint256 nullifier = pending.withdrawalNullifier;
         uint128 finalBalance = pending.finalBalance;
         address destination = pending.destination;
         uint128 operatorShare = note.depositAmount - finalBalance;
-
-        // Effects
         note.status = Types.NoteStatus.Closed;
         delete pendingWithdrawals[noteId];
-
-        // Interactions: pay user then treasury (same as mutual close)
-        if (finalBalance > 0) {
-            billingToken.safeTransfer(destination, uint256(finalBalance));
-        }
-        if (operatorShare > 0) {
-            billingToken.safeTransfer(treasury, uint256(operatorShare));
-        }
-
+        _pay(destination, finalBalance, operatorShare);
         emit EscapeWithdrawalFinalized(noteId, nullifier, finalBalance, destination);
     }
 
-    // -----------------------------------------------------------------------
-    //  Claim Expired
-    // -----------------------------------------------------------------------
-
-    /// @notice Claim an expired note's deposit for the treasury.
-    /// @param noteId   The expired note.
-    /// @param siblings Merkle sibling path.
-    function claimExpired(uint32 noteId, uint256[32] calldata siblings) external nonReentrant whenNotPaused {
+    function claimExpired(uint32 noteId, uint256[32] calldata siblings) external nonReentrant {
         Types.Note storage note = notes[noteId];
-
-        // Note must be active
         if (note.status != Types.NoteStatus.Active) revert Errors.NoteNotActive();
-
-        // Must be past expiry
         if (block.timestamp < note.expiryTs) revert Errors.NoteNotExpired();
-
-        // Zero the leaf
-        uint256 oldLeaf = NoteLeafLib.computeLeaf(noteId, note.commitment, note.depositAmount, note.expiryTs);
-        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(currentRoot, noteId, oldLeaf, 0, siblings);
-
-        uint128 depositAmount = note.depositAmount;
-
-        // Effects
+        uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(currentRoot, noteId, _leaf(noteId, note), 0, siblings);
+        uint128 amount = note.depositAmount;
         currentRoot = newRoot;
         note.status = Types.NoteStatus.Closed;
-
-        // Interactions: full deposit goes to treasury
-        billingToken.safeTransfer(treasury, uint256(depositAmount));
-
-        emit ExpiredClaimed(noteId, depositAmount, newRoot);
+        billingToken.safeTransfer(treasury, amount);
+        emit ExpiredClaimed(noteId, amount, newRoot);
     }
 
-    // -----------------------------------------------------------------------
-    //  Admin: Proof Adapter
-    // -----------------------------------------------------------------------
-
-    /// @notice Set the proof adapter contract address.
-    /// @param newAdapter The new adapter address.
-    function setProofAdapter(address newAdapter) external onlyOwner {
-        proofAdapter = newAdapter;
-        emit ProofAdapterSet(newAdapter);
-    }
-
-    // -----------------------------------------------------------------------
-    //  Admin: Treasury
-    // -----------------------------------------------------------------------
-
-    /// @notice Set the treasury address.
-    /// @param newTreasury The new treasury address.
     function setTreasury(address newTreasury) external onlyOwner {
+        if (newTreasury == address(0)) revert Errors.Unauthorized();
         treasury = newTreasury;
         emit TreasurySet(newTreasury);
     }
 
-    // -----------------------------------------------------------------------
-    //  Admin: Server Signing Roots
-    // -----------------------------------------------------------------------
-
-    /// @notice Publish a new XMSS epoch with state and clearance roots.
-    /// @dev Epoch numbers must increase strictly monotonically.
-    /// @param epoch     The new epoch number.
-    /// @param stateRoot The state-signature XMSS root for this epoch.
-    /// @param clearRoot The clearance-signature XMSS root for this epoch.
-    function rotateServerRoots(uint32 epoch, uint256 stateRoot, uint256 clearRoot) external onlyOwner {
-        // Epoch must be strictly greater than the current epoch
-        // (also prevents re-registration of an existing epoch)
-        if (epoch <= currentEpoch && currentEpoch != 0) revert Errors.EpochNotFound();
-        // For the very first epoch, allow epoch > 0
-        if (currentEpoch == 0 && epoch == 0) revert Errors.EpochNotFound();
-
-        // Prevent overwriting an already-registered epoch
-        if (stateSigRootByEpoch[epoch] != 0) revert Errors.EpochNotFound();
-
-        currentEpoch = epoch;
-        stateSigRootByEpoch[epoch] = stateRoot;
-        clearSigRootByEpoch[epoch] = clearRoot;
-
-        emit ServerRootsRotated(epoch, stateRoot, clearRoot);
-    }
-
-    // -----------------------------------------------------------------------
-    //  Admin: Pause
-    // -----------------------------------------------------------------------
-
-    /// @notice Pause the contract (blocks deposits and withdrawals).
     function pause() external onlyOwner {
         paused = true;
     }
 
-    /// @notice Unpause the contract.
     function unpause() external onlyOwner {
         paused = false;
     }
 
-    // -----------------------------------------------------------------------
-    //  Internal helpers
-    // -----------------------------------------------------------------------
-
-    /// @dev Validate the state-signature root for a withdrawal or request.
-    ///      When isGenesis is true, epoch and root checks are skipped.
-    function _validateStateSigRoot(bool isGenesis, uint32 epoch, uint256 root) internal view {
-        if (isGenesis) return;
-        uint256 storedRoot = stateSigRootByEpoch[epoch];
-        if (storedRoot == 0) revert Errors.EpochNotFound();
-        if (storedRoot != root) revert Errors.EpochNotFound();
+    function _closeActive(Types.WithdrawalPublicInputs calldata inputs, uint256[32] calldata siblings) private {
+        Types.Note storage note = notes[inputs.noteId];
+        if (note.status != Types.NoteStatus.Active) revert Errors.NoteNotActive();
+        if (inputs.finalBalance > note.depositAmount) revert Errors.InvalidBalance();
+        _consumeNullifier(inputs.withdrawalNullifier);
+        uint256 newRoot =
+            MerkleUpdateLib.verifyAndUpdate(currentRoot, inputs.noteId, _leaf(inputs.noteId, note), 0, siblings);
+        uint128 operatorShare = note.depositAmount - inputs.finalBalance;
+        currentRoot = newRoot;
+        note.status = Types.NoteStatus.Closed;
+        _pay(inputs.destination, inputs.finalBalance, operatorShare);
     }
 
-    /// @dev Validate the clearance-signature root for a mutual close.
-    function _validateClearSigRoot(uint32 epoch, uint256 root) internal view {
-        uint256 storedRoot = clearSigRootByEpoch[epoch];
-        if (storedRoot == 0) revert Errors.EpochNotFound();
-        if (storedRoot != root) revert Errors.EpochNotFound();
+    function _pay(address destination, uint128 balance, uint128 operatorShare) private {
+        if (balance != 0) billingToken.safeTransfer(destination, balance);
+        if (operatorShare != 0) billingToken.safeTransfer(treasury, operatorShare);
     }
 
-    /// @dev Compute the root of an all-zero Merkle tree of depth 32.
-    ///      level_0 = 0, level_{i+1} = H(DOMAIN_NODE, level_i, level_i)
-    function _computeEmptyTreeRoot() internal pure returns (uint256) {
-        uint256 node = 0;
-        for (uint256 i = 0; i < MerkleUpdateLib.MERKLE_DEPTH; i++) {
-            node = MerkleUpdateLib.poseidonNodeHash(MerkleUpdateLib.DOMAIN_NODE, node, node);
+    function _consumeNullifier(uint256 nullifier) private {
+        if (usedNullifiers[nullifier]) revert Errors.ReplayedNullifier();
+        usedNullifiers[nullifier] = true;
+    }
+
+    function _validateRequestBinding(Types.RequestPublicInputs calldata inputs) private view {
+        if (
+            inputs.protocolVersion != PROTOCOL_VERSION || inputs.chainId != block.chainid
+                || inputs.contractAddress != address(this) || inputs.stateSigningKeyX != stateSigningKeyX
+                || inputs.stateSigningKeyY != stateSigningKeyY
+        ) revert Errors.InvalidDeploymentBinding();
+    }
+
+    function _validateWithdrawalBinding(Types.WithdrawalPublicInputs calldata inputs) private view {
+        if (
+            inputs.protocolVersion != PROTOCOL_VERSION || inputs.chainId != block.chainid
+                || inputs.contractAddress != address(this) || inputs.stateSigningKeyX != stateSigningKeyX
+                || inputs.stateSigningKeyY != stateSigningKeyY || inputs.clearanceSigningKeyX != clearanceSigningKeyX
+                || inputs.clearanceSigningKeyY != clearanceSigningKeyY
+        ) revert Errors.InvalidDeploymentBinding();
+    }
+
+    function _leaf(uint32 noteId, Types.Note storage note) private view returns (uint256) {
+        return NoteLeafLib.computeLeaf(noteId, note.commitment, note.depositAmount, note.expiryTs);
+    }
+
+    function _computeEmptyTreeRoot() private pure returns (uint256 root) {
+        for (uint256 level = 0; level < MERKLE_DEPTH;) {
+            root = MerkleUpdateLib.poseidonNodeHash(root, root);
+            unchecked {
+                ++level;
+            }
         }
-        return node;
+    }
+
+    function _requireField(uint256 value) private pure {
+        if (value >= MerkleUpdateLib.FIELD_MODULUS) revert Errors.InvalidFelt();
     }
 }

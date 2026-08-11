@@ -4,10 +4,9 @@
 //! - zero leaf value: 0
 //! - node hash: Poseidon(domain("zkapi.node"), left, right)
 
-use zkapi_types::domain::DOMAIN_NODE;
 use zkapi_types::{Felt252, MERKLE_DEPTH};
 
-use crate::poseidon::poseidon_hash;
+use crate::v2::merkle_node;
 
 /// Compute the zero hashes for each level.
 /// zero_hashes[0] = 0 (leaf)
@@ -15,7 +14,7 @@ use crate::poseidon::poseidon_hash;
 pub fn compute_zero_hashes() -> [Felt252; MERKLE_DEPTH + 1] {
     let mut zeros = [Felt252::ZERO; MERKLE_DEPTH + 1];
     for i in 1..=MERKLE_DEPTH {
-        zeros[i] = poseidon_hash(&DOMAIN_NODE, &zeros[i - 1], &zeros[i - 1]);
+        zeros[i] = merkle_node(&zeros[i - 1], &zeros[i - 1]);
     }
     zeros
 }
@@ -30,9 +29,9 @@ pub fn compute_root(index: u32, leaf: &Felt252, siblings: &[Felt252; MERKLE_DEPT
     let mut idx = index;
     for sibling in siblings.iter().take(MERKLE_DEPTH) {
         if idx & 1 == 0 {
-            current = poseidon_hash(&DOMAIN_NODE, &current, sibling);
+            current = merkle_node(&current, sibling);
         } else {
-            current = poseidon_hash(&DOMAIN_NODE, sibling, &current);
+            current = merkle_node(sibling, &current);
         }
         idx >>= 1;
     }
@@ -110,7 +109,7 @@ impl MerkleTree {
             let right_idx = left_idx + 1;
             let left = self.get_node(level, left_idx);
             let right = self.get_node(level, right_idx);
-            let parent = poseidon_hash(&DOMAIN_NODE, &left, &right);
+            let parent = merkle_node(&left, &right);
             self.nodes[level + 1].insert(parent_idx, parent);
             idx = parent_idx;
         }

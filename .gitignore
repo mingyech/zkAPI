@@ -22,3 +22,5 @@ docs/book/
 *.db-journal
 *.db-shm
 *.db-wal
+# The selected v2 Groth16 proving/verifying keys are versioned intentionally:
+# clients must use the exact setup bound into the deployed Solidity verifier.

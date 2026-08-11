@@ -2,10 +2,7 @@
 //!
 //! leaf = Poseidon(domain("zkapi.leaf"), note_id, C, D, expiry_ts)
 
-use zkapi_types::domain::DOMAIN_LEAF;
 use zkapi_types::Felt252;
-
-use crate::poseidon::poseidon_hash_chain;
 
 /// Compute the active note leaf.
 ///
@@ -16,23 +13,14 @@ pub fn compute_note_leaf(
     deposit_amount: u128,
     expiry_ts: u64,
 ) -> Felt252 {
-    poseidon_hash_chain(
-        &DOMAIN_LEAF,
-        &[
-            Felt252::from_u64(note_id as u64),
-            *commitment,
-            Felt252::from_u128(deposit_amount),
-            Felt252::from_u64(expiry_ts),
-        ],
-    )
+    crate::v2::note_leaf(note_id, commitment, deposit_amount, expiry_ts)
 }
 
 /// Compute the registration commitment.
 ///
 /// `C = Poseidon(domain("zkapi.reg"), s, 0)`
 pub fn compute_registration_commitment(secret: &Felt252) -> Felt252 {
-    use zkapi_types::domain::DOMAIN_REG;
-    crate::poseidon::poseidon_hash(&DOMAIN_REG, secret, &Felt252::ZERO)
+    crate::v2::registration_commitment(secret)
 }
 
 #[cfg(test)]

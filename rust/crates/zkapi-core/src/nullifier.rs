@@ -4,14 +4,11 @@
 //! For genesis: tau = 1
 //! For later states: tau = server-issued anchor
 
-use zkapi_types::domain::DOMAIN_NULL;
 use zkapi_types::Felt252;
-
-use crate::poseidon::poseidon_hash;
 
 /// Compute a nullifier from the user secret and state anchor.
 pub fn compute_nullifier(secret: &Felt252, anchor: &Felt252) -> Felt252 {
-    poseidon_hash(&DOMAIN_NULL, secret, anchor)
+    crate::v2::nullifier(secret, anchor)
 }
 
 /// Compute the genesis nullifier.

@@ -15,12 +15,13 @@ pub mod wire;
 pub use domain::{DomainTag, DOMAIN_TAGS};
 pub use felt::Felt252;
 pub use inputs::{
-    canonical_payload_hash, canonical_response_hash, public_output_hash_from_cairo_outputs,
-    request_public_output_hash_from_outputs, withdrawal_public_output_hash_from_outputs,
-    RequestPublicInputs, WithdrawalPublicInputs,
+    canonical_payload_hash, canonical_request_context, canonical_response_hash,
+    public_output_hash_from_cairo_outputs, request_public_output_hash_from_outputs,
+    withdrawal_public_output_hash_from_outputs, RequestPublicInputs, RequestPublicInputsV2,
+    WithdrawalPublicInputs, WithdrawalPublicInputsV2,
 };
 pub use note::{Note, NoteStatus, NullifierStatus, PendingWithdrawal};
-pub use signature::XmssSignature;
+pub use signature::{SchnorrSignature, XmssSignature};
 
 /// Published server signing roots for one epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -60,8 +61,8 @@ mod epoch_roots_tests {
     }
 }
 
-/// Protocol version for v1.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Protocol version for the compact BN254 proof protocol.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Merkle tree depth.
 pub const MERKLE_DEPTH: usize = 32;
@@ -87,9 +88,14 @@ pub const WOTS_LEN: usize = WOTS_LEN1 + WOTS_LEN2;
 /// Challenge period in seconds (24 hours).
 pub const CHALLENGE_PERIOD: u64 = 86400;
 
-/// The Stark field prime: P = 2^251 + 17 * 2^192 + 1
-pub const STARK_PRIME_HEX: &str =
-    "0x0800000000000011000000000000000000000000000000000000000000000001";
+/// BN254 scalar-field modulus used by the v2 statements.
+pub const FIELD_MODULUS_HEX: &str =
+    "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001";
+
+/// Kept for source compatibility inside the retired Cairo modules. New code
+/// must use [`FIELD_MODULUS_HEX`].
+#[deprecated(note = "v2 uses the BN254 scalar field")]
+pub const STARK_PRIME_HEX: &str = FIELD_MODULUS_HEX;
 
 /// Genesis anchor value.
 pub const GENESIS_ANCHOR: u64 = 1;

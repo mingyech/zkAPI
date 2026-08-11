@@ -1,23 +1,18 @@
 //! Client configuration.
 
+use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
 /// Proof backend used by the wallet when building request/withdrawal proofs.
 #[derive(Debug, Clone)]
 pub enum ClientProofMode {
-    /// Generate real Stwo/Stwo-Cairo proof artifacts through Scarb.
-    StwoScarb {
-        /// Path to the Cairo package directory.
-        cairo_dir: String,
-    },
-    /// Development-only local witness envelope.
-    #[cfg(feature = "dev-witness-envelope")]
-    DevWitnessEnvelope,
+    /// Generate compact Groth16 proofs using the circuit-specific setup files.
+    Groth16 { setup_dir: String },
 }
 
 /// Configuration for the client SDK, matching the deployed contract parameters.
 pub struct ClientConfig {
-    /// Protocol version (must be 1 for v1).
+    /// Protocol version (must be 2).
     pub protocol_version: u16,
     /// Chain ID of the target network.
     pub chain_id: u64,
@@ -33,8 +28,11 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Directory for persisting wallet state and journals.
     pub state_dir: String,
-    /// Trusted server signing roots published by the epoch registry.
+    /// Retired v1 field; ignored by the v2 wallet.
     pub trusted_epoch_roots: Vec<EpochRoots>,
     /// Proof backend used for runtime proof generation.
     pub proof_mode: ClientProofMode,
+    /// Server signing keys pinned by the deployment contract/configuration.
+    pub state_signing_key: CurvePointWire,
+    pub clearance_signing_key: CurvePointWire,
 }

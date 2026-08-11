@@ -5,10 +5,6 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-dev-witness-envelope = ["zkapi-proof/dev-witness-envelope"]
-
 [dependencies]
 zkapi-types  = { workspace = true }
 zkapi-core   = { workspace = true }

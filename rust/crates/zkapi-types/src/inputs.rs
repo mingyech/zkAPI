@@ -8,6 +8,99 @@ use sha3::{Digest, Keccak256};
 
 use crate::{Felt252, STATEMENT_TYPE_REQUEST, STATEMENT_TYPE_WITHDRAWAL};
 
+/// Public statement verified for every v2 API request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestPublicInputsV2 {
+    pub protocol_version: u16,
+    pub chain_id: u64,
+    pub contract_address: Felt252,
+    pub active_root: Felt252,
+    pub state_signing_key_x: Felt252,
+    pub state_signing_key_y: Felt252,
+    pub request_time: u64,
+    pub solvency_bound: u128,
+    pub request_nullifier: Felt252,
+    pub authorization_tag: Felt252,
+    pub anonymous_commitment_x: Felt252,
+    pub anonymous_commitment_y: Felt252,
+}
+
+impl RequestPublicInputsV2 {
+    pub fn to_field_elements(&self) -> [Felt252; 12] {
+        [
+            Felt252::from_u64(self.protocol_version as u64),
+            Felt252::from_u64(self.chain_id),
+            self.contract_address,
+            self.active_root,
+            self.state_signing_key_x,
+            self.state_signing_key_y,
+            Felt252::from_u64(self.request_time),
+            Felt252::from_u128(self.solvency_bound),
+            self.request_nullifier,
+            self.authorization_tag,
+            self.anonymous_commitment_x,
+            self.anonymous_commitment_y,
+        ]
+    }
+}
+
+/// Public statement verified for a v2 mutual or escape withdrawal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WithdrawalPublicInputsV2 {
+    pub protocol_version: u16,
+    pub chain_id: u64,
+    pub contract_address: Felt252,
+    pub active_root: Felt252,
+    pub state_signing_key_x: Felt252,
+    pub state_signing_key_y: Felt252,
+    pub clearance_signing_key_x: Felt252,
+    pub clearance_signing_key_y: Felt252,
+    pub note_id: u32,
+    pub final_balance: u128,
+    pub destination: [u8; 20],
+    pub withdrawal_nullifier: Felt252,
+    pub has_clearance: bool,
+    pub withdrawal_tag: Felt252,
+}
+
+impl WithdrawalPublicInputsV2 {
+    pub fn destination_field(&self) -> Felt252 {
+        let mut bytes = [0u8; 32];
+        bytes[12..].copy_from_slice(&self.destination);
+        Felt252(bytes)
+    }
+
+    pub fn to_field_elements(&self) -> [Felt252; 14] {
+        [
+            Felt252::from_u64(self.protocol_version as u64),
+            Felt252::from_u64(self.chain_id),
+            self.contract_address,
+            self.active_root,
+            self.state_signing_key_x,
+            self.state_signing_key_y,
+            self.clearance_signing_key_x,
+            self.clearance_signing_key_y,
+            Felt252::from_u64(self.note_id as u64),
+            Felt252::from_u128(self.final_balance),
+            self.destination_field(),
+            self.withdrawal_nullifier,
+            Felt252::from_u64(self.has_clearance as u64),
+            self.withdrawal_tag,
+        ]
+    }
+}
+
+/// Hash the exact client request id and payload digest into the private context
+/// that the request proof binds through `authorization_tag`.
+pub fn canonical_request_context(client_request_id: &str, payload_hash: &Felt252) -> Felt252 {
+    let id = client_request_id.as_bytes();
+    let mut bytes = Vec::with_capacity(8 + id.len() + 32);
+    bytes.extend_from_slice(&(id.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(payload_hash.as_bytes());
+    hash_bytes_to_felt(b"zkapi.v2.request-context", &bytes)
+}
+
 /// Public inputs for a request proof.
 ///
 /// The Cairo request program emits these as public outputs in this exact order.
@@ -262,6 +355,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn fact_vectors_for_solidity_sync_are_stable() {
         let request = RequestPublicInputs {

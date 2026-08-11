@@ -16,6 +16,7 @@ use crate::Felt252;
 #[serde(rename_all = "snake_case")]
 pub enum ProofBackendWire {
     StwoCairo,
+    Groth16Bn254,
 }
 
 /// Opaque proof artifact sent across runtime boundaries.
@@ -25,6 +26,59 @@ pub struct ProofArtifactWire {
     pub public_output_hash: Felt252,
     /// Base64-encoded opaque proof bytes.
     pub proof: String,
+}
+
+/// Compact Groth16 proof artifact. Public inputs are carried in the enclosing
+/// request and are verified directly; there is no separately trusted output
+/// hash or witness envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Groth16ProofWire {
+    pub backend: ProofBackendWire,
+    /// Arkworks canonical compressed proof bytes, base64 encoded.
+    pub proof: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiRequestV2 {
+    pub client_request_id: String,
+    pub payload: String,
+    pub payload_hash: Felt252,
+    pub public_inputs: crate::RequestPublicInputsV2,
+    pub proof: Groth16ProofWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestResponseV2 {
+    pub status: String,
+    pub client_request_id: String,
+    pub request_nullifier: Felt252,
+    pub response_code: u16,
+    pub response_payload: String,
+    pub response_hash: Felt252,
+    pub charge_applied: u128,
+    pub next_commitment: CurvePointWire,
+    pub next_anchor: Felt252,
+    pub blind_delta_srv: Felt252,
+    pub next_state_signature: crate::SchnorrSignature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_reason_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_evidence_hash: Option<Felt252>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearanceResponseV2 {
+    pub status: String,
+    pub withdrawal_nullifier: Felt252,
+    pub signature: crate::SchnorrSignature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryResponseV2 {
+    pub status: String,
+    pub nullifier_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_response: Option<RequestResponseV2>,
 }
 
 /// A curve point serialized as {x, y} hex fields.

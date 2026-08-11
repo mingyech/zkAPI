@@ -6,9 +6,7 @@ members = [
     "crates/zkapi-crypto",
     "crates/zkapi-proof",
     "crates/zkapi-client",
-    "crates/zkapi-server",
     "crates/zkapi-indexer",
-    "crates/zkapi-cli",
 ]
 
 [workspace.package]
@@ -34,10 +32,18 @@ serde_json = "1.0"
 hex = "0.4"
 base64 = "0.22"
 
-# Arkworks (Stark curve Pedersen commitment)
+# Arkworks BN254 Groth16 and Baby-JubJub primitives
 ark-ff  = "0.5"
 ark-ec  = "0.5"
 ark-std = "0.5"
+ark-bn254 = "0.5"
+ark-crypto-primitives = { version = "0.5", features = ["sponge", "r1cs", "snark"] }
+ark-ed-on-bn254 = { version = "0.5", features = ["r1cs", "std"] }
+ark-groth16 = "0.5"
+ark-r1cs-std = "0.5"
+ark-relations = "0.5"
+ark-serialize = "0.5"
+ark-snark = "0.5"
 
 # Hashing
 sha3 = "0.10"

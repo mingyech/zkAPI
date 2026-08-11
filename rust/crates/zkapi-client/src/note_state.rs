@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use zkapi_types::{Felt252, XmssSignature};
+use zkapi_types::{Felt252, SchnorrSignature};
 
 use crate::error::ClientError;
 
@@ -32,9 +32,7 @@ pub struct NoteState {
     pub current_commitment_y: Felt252,
     pub current_anchor: Felt252,
     pub is_genesis: bool,
-    pub state_sig_epoch: Option<u32>,
-    pub state_sig_root: Option<Felt252>,
-    pub state_sig: Option<XmssSignature>,
+    pub state_signature: Option<SchnorrSignature>,
 }
 
 impl NoteState {
@@ -69,9 +67,7 @@ impl NoteState {
             current_commitment_y: commitment_y,
             current_anchor: Felt252::ONE, // genesis anchor
             is_genesis: true,
-            state_sig_epoch: None,
-            state_sig_root: None,
-            state_sig: None,
+            state_signature: None,
         }
     }
 
@@ -181,7 +177,7 @@ mod tests {
         assert!(state.is_genesis);
         assert_eq!(state.current_balance, 1000);
         assert_eq!(state.current_anchor, Felt252::ONE);
-        assert!(state.state_sig.is_none());
+        assert!(state.state_signature.is_none());
     }
 
     #[test]

@@ -4,9 +4,7 @@ pragma solidity ^0.8.28;
 import {Types} from "../libraries/Types.sol";
 
 /// @title IZkApiProofAdapter – Proof verification boundary
-/// @notice The vault delegates all proof verification to an adapter so the
-///         backend (inline STARK verifier, fact registry, mock, etc.) can be
-///         swapped without rewriting business logic.
+/// @notice The vault delegates Groth16 verification to this boundary.
 interface IZkApiProofAdapter {
     /// @notice Assert that a request proof is valid for the given public inputs.
     /// @dev Must revert if the proof is invalid.

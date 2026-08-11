@@ -42,11 +42,8 @@ library Errors {
     /// @notice Expected PendingWithdrawal status but note is not pending.
     error NotPendingWithdrawal();
 
-    /// @notice The statement type in the proof inputs is wrong.
-    error InvalidStatementType();
-
-    /// @notice No server root registered for the given epoch.
-    error EpochNotFound();
+    /// @notice A proof is for another protocol, chain, contract, or signing key.
+    error InvalidDeploymentBinding();
 
     /// @notice The sibling array length or values are invalid.
     error InvalidSiblings();
@@ -60,6 +57,6 @@ library Errors {
     /// @notice The caller is not authorized for this operation.
     error Unauthorized();
 
-    /// @notice A felt value is >= STARK_FIELD_PRIME.
+    /// @notice A field value is outside the BN254 scalar field.
     error InvalidFelt();
 }

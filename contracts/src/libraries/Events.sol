@@ -26,8 +26,6 @@ abstract contract Events {
 
     event ExpiredClaimed(uint32 indexed noteId, uint128 depositAmount, uint256 newRoot);
 
-    event ServerRootsRotated(uint32 indexed epoch, uint256 stateRoot, uint256 clearRoot);
-
     event ProofAdapterSet(address indexed newAdapter);
 
     event TreasurySet(address indexed newTreasury);

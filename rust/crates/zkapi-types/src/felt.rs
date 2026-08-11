@@ -1,13 +1,15 @@
-//! Felt252 type for Stark field elements.
+//! Canonical 32-byte encoding for zkAPI v2 BN254 scalar-field elements.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
-use crate::STARK_PRIME_HEX;
+use crate::FIELD_MODULUS_HEX;
 
-/// A field element in the Stark prime field.
+/// A field element in the BN254 scalar field.
 ///
-/// Stored as 32 bytes big-endian. Must be < STARK_PRIME.
+/// The historical `Felt252` name is retained internally to keep the surrounding
+/// wallet/indexer code compact. Values are stored big-endian and must be below
+/// the BN254 scalar modulus.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Felt252(pub [u8; 32]);
 
@@ -33,10 +35,10 @@ impl Felt252 {
         Self(bytes)
     }
 
-    /// Create from canonical big-endian bytes. Rejects values >= STARK_PRIME.
+    /// Create from canonical big-endian bytes. Rejects non-field values.
     pub fn try_from_bytes_be(bytes: [u8; 32]) -> Result<Self, String> {
-        if bytes >= stark_prime_bytes() {
-            return Err("felt252 value must be < STARK_FIELD_PRIME".to_string());
+        if bytes >= field_modulus_bytes() {
+            return Err("field element must be below the BN254 scalar modulus".to_string());
         }
         Ok(Self(bytes))
     }
@@ -105,15 +107,15 @@ impl Felt252 {
     }
 }
 
-fn stark_prime_bytes() -> [u8; 32] {
-    let hex = STARK_PRIME_HEX
+fn field_modulus_bytes() -> [u8; 32] {
+    let hex = FIELD_MODULUS_HEX
         .strip_prefix("0x")
-        .unwrap_or(STARK_PRIME_HEX);
+        .unwrap_or(FIELD_MODULUS_HEX);
     let mut bytes = [0u8; 32];
     let mut i = 0;
     while i < 32 {
         bytes[i] =
-            u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("STARK_PRIME_HEX is valid hex");
+            u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("FIELD_MODULUS_HEX is valid hex");
         i += 1;
     }
     bytes
@@ -184,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_rejects_noncanonical_prime_values() {
-        let prime = stark_prime_bytes();
+        let prime = field_modulus_bytes();
         assert!(Felt252::try_from_bytes_be(prime).is_err());
 
         let mut prime_plus_one = prime;
