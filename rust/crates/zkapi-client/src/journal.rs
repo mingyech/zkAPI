@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use zkapi_types::wire::ApiRequestV2;
 use zkapi_types::Felt252;
 
 use crate::error::ClientError;
@@ -30,6 +31,10 @@ pub struct PendingRequestJournal {
     pub user_rerandomization: Felt252,
     /// Wall-clock time when the journal was created (milliseconds since epoch).
     pub created_at_ms: u64,
+    /// Complete prepared request for idempotent transport retry. This contains
+    /// only public proof material and the already-authorized payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_request: Option<ApiRequestV2>,
 }
 
 impl PendingRequestJournal {
@@ -118,6 +123,7 @@ mod tests {
             payload_hash: Felt252::from_u64(0xabcd),
             user_rerandomization: Felt252::from_u64(7),
             created_at_ms: 1700000000000,
+            prepared_request: None,
         };
         PendingRequestJournal::write(&path, &journal).unwrap();
         let loaded = PendingRequestJournal::read(&path).unwrap().unwrap();
@@ -151,6 +157,7 @@ mod tests {
             payload_hash: Felt252::ZERO,
             user_rerandomization: Felt252::ZERO,
             created_at_ms: 0,
+            prepared_request: None,
         };
         PendingRequestJournal::write(&path, &journal).unwrap();
         assert!(path.exists());

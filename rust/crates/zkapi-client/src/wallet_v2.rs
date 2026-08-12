@@ -69,6 +69,13 @@ impl Wallet {
         PendingRequestJournal::read(&self.journal_path)
     }
 
+    /// Return the durable, already-proved request for an idempotent transport
+    /// retry. Older journals may not contain the full request.
+    pub fn pending_api_request(&self) -> Result<Option<ApiRequestV2>, ClientError> {
+        Ok(PendingRequestJournal::read(&self.journal_path)?
+            .and_then(|journal| journal.prepared_request))
+    }
+
     pub fn generate_deposit_params(&self) -> (Felt252, Felt252) {
         loop {
             let secret = random_field();
@@ -114,6 +121,51 @@ impl Wallet {
         active_root: Felt252,
         merkle_siblings: Vec<Felt252>,
     ) -> Result<RequestResponseV2, ClientError> {
+        let request = self.prepare_request(payload, payload_hash, active_root, merkle_siblings)?;
+        let response = self
+            .http
+            .post(format!(
+                "{}/v2/requests",
+                self.config.server_url.trim_end_matches('/')
+            ))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| ClientError::ServerError(error.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ClientError::ServerError(error.to_string()))?;
+        if !status.is_success() {
+            if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
+                if error.error_code == "stale_root" {
+                    self.clear_pending_request()?;
+                    return Err(ClientError::StaleRoot);
+                }
+                return Err(ClientError::ServerError(format!(
+                    "{}: {}",
+                    error.error_code, error.error_message
+                )));
+            }
+            return Err(ClientError::ServerError(format!("HTTP {status}: {body}")));
+        }
+        let response: RequestResponseV2 = serde_json::from_str(&body)
+            .map_err(|error| ClientError::InvalidResponse(error.to_string()))?;
+        self.complete_pending_response(&response)?;
+        Ok(response)
+    }
+
+    /// Generate and durably journal one zkAPI request without submitting it.
+    /// This is used by multi-network-request flows such as an OpenRouter lease,
+    /// whose zkAPI state transition completes only after later settlement.
+    pub fn prepare_request(
+        &mut self,
+        payload: &str,
+        payload_hash: Felt252,
+        active_root: Felt252,
+        merkle_siblings: Vec<Felt252>,
+    ) -> Result<ApiRequestV2, ClientError> {
         if self.has_pending_request() {
             return Err(ClientError::PendingRequest);
         }
@@ -181,18 +233,6 @@ impl Wallet {
             )
             .map_err(|error| ClientError::ProofGeneration(error.to_string()))?;
 
-        PendingRequestJournal::write(
-            &self.journal_path,
-            &PendingRequestJournal {
-                exists: true,
-                client_request_id: client_request_id.clone(),
-                nullifier,
-                payload_hash,
-                user_rerandomization: rerandomization,
-                created_at_ms: now_ms(),
-            },
-        )?;
-
         let request = ApiRequestV2 {
             client_request_id: client_request_id.clone(),
             payload: payload.to_string(),
@@ -200,45 +240,53 @@ impl Wallet {
             public_inputs,
             proof,
         };
-        let response = self
-            .http
-            .post(format!(
-                "{}/v2/requests",
-                self.config.server_url.trim_end_matches('/')
-            ))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| ClientError::ServerError(error.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| ClientError::ServerError(error.to_string()))?;
-        if !status.is_success() {
-            if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
-                if error.error_code == "stale_root" {
-                    PendingRequestJournal::clear(&self.journal_path)?;
-                    return Err(ClientError::StaleRoot);
-                }
-                return Err(ClientError::ServerError(format!(
-                    "{}: {}",
-                    error.error_code, error.error_message
-                )));
-            }
-            return Err(ClientError::ServerError(format!("HTTP {status}: {body}")));
-        }
-        let response: RequestResponseV2 = serde_json::from_str(&body)
-            .map_err(|error| ClientError::InvalidResponse(error.to_string()))?;
+        PendingRequestJournal::write(
+            &self.journal_path,
+            &PendingRequestJournal {
+                exists: true,
+                client_request_id,
+                nullifier,
+                payload_hash,
+                user_rerandomization: rerandomization,
+                created_at_ms: now_ms(),
+                prepared_request: Some(request.clone()),
+            },
+        )?;
+        Ok(request)
+    }
+
+    /// Verify a finalized response for the currently journaled request, persist
+    /// the next note state, and clear the journal atomically after the state is
+    /// safe on disk.
+    pub fn complete_pending_response(
+        &mut self,
+        response: &RequestResponseV2,
+    ) -> Result<(), ClientError> {
+        let journal =
+            PendingRequestJournal::read(&self.journal_path)?.ok_or(ClientError::PendingRequest)?;
+        let state = self.state.as_ref().ok_or(ClientError::NoActiveNote)?;
+        let current = balance_commitment(
+            state.current_balance,
+            &parse_scalar(&state.balance_blinding)?,
+        );
+        ensure_stored_commitment(state, &current)?;
+        let anonymous = rerandomize(&current, &journal.user_rerandomization)
+            .map_err(|error| ClientError::VerificationFailed(error.to_string()))?;
         self.apply_response(
-            &response,
-            &client_request_id,
-            nullifier,
+            response,
+            &journal.client_request_id,
+            journal.nullifier,
             &anonymous,
-            rerandomization,
+            journal.user_rerandomization,
         )?;
         PendingRequestJournal::clear(&self.journal_path)?;
-        Ok(response)
+        Ok(())
+    }
+
+    /// Clear a request that the server explicitly rejected before reserving its
+    /// nullifier (for example because the indexer root was stale).
+    pub fn clear_pending_request(&self) -> Result<(), ClientError> {
+        PendingRequestJournal::clear(&self.journal_path)
     }
 
     pub async fn recover(&mut self) -> Result<Option<RequestResponseV2>, ClientError> {
@@ -267,22 +315,7 @@ impl Wallet {
         let Some(response) = recovery.request_response else {
             return Ok(None);
         };
-        let state = self.state.as_ref().ok_or(ClientError::NoActiveNote)?;
-        let current = balance_commitment(
-            state.current_balance,
-            &parse_scalar(&state.balance_blinding)?,
-        );
-        ensure_stored_commitment(state, &current)?;
-        let anonymous = rerandomize(&current, &journal.user_rerandomization)
-            .map_err(|error| ClientError::VerificationFailed(error.to_string()))?;
-        self.apply_response(
-            &response,
-            &journal.client_request_id,
-            journal.nullifier,
-            &anonymous,
-            journal.user_rerandomization,
-        )?;
-        PendingRequestJournal::clear(&self.journal_path)?;
+        self.complete_pending_response(&response)?;
         Ok(Some(response))
     }
 

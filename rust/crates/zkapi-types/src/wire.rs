@@ -47,6 +47,60 @@ pub struct ApiRequestV2 {
     pub proof: Groth16ProofWire,
 }
 
+/// Prompt-free payload authorized by a client when opening a short-lived
+/// OpenRouter lease. The server rejects extra fields so this protocol message
+/// cannot accidentally carry an LLM prompt or response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRouterLeaseAuthorization {
+    pub mode: String,
+    pub version: u16,
+}
+
+impl Default for OpenRouterLeaseAuthorization {
+    fn default() -> Self {
+        Self {
+            mode: "openrouter_ephemeral_lease".to_string(),
+            version: 1,
+        }
+    }
+}
+
+/// A freshly-issued, short-lived OpenRouter key. The plaintext key is only
+/// present in this live response; server recovery responses never contain it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenRouterLeaseResponse {
+    pub status: String,
+    pub client_request_id: String,
+    pub api_key: String,
+    /// OpenRouter inference base, normally `https://openrouter.ai/api/v1`.
+    pub openrouter_api_base: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub valid_for_seconds: u64,
+    /// The server will not finalize usage before this UNIX timestamp.
+    pub settle_after: u64,
+    pub spending_limit_usd: f64,
+}
+
+/// Non-secret lease metadata, safe to return during crash recovery. It never
+/// contains the plaintext OpenRouter runtime key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenRouterLeaseStatusResponse {
+    pub status: String,
+    pub client_request_id: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub settle_after: u64,
+    pub spending_limit_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charge_applied: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestResponseV2 {
     pub status: String,
