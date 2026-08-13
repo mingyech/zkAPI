@@ -644,7 +644,7 @@ fn poseidon_solidity_source() -> String {
         .mds
         .iter()
         .flatten()
-        .map(|value| field_hex(value))
+        .map(field_hex)
         .collect::<Vec<_>>();
     let mut source = r#"// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
