@@ -508,8 +508,10 @@ fn proof_from_wire(proof: &Groth16ProofWire) -> Result<Proof<Bn254>> {
         ));
     }
     let coordinates = bytes
-        .chunks_exact(32)
-        .map(canonical_fq)
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .map(|coordinate| canonical_fq(coordinate))
         .collect::<Result<Vec<_>>>()?;
     let a = G1Affine::new_unchecked(coordinates[0], coordinates[1]);
     let b = G2Affine::new_unchecked(
@@ -1047,6 +1049,59 @@ fn field_hex<F: PrimeField>(value: &F) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_wire_preserves_coordinate_order() {
+        let proof = Proof::<Bn254> {
+            a: G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: -G1Affine::generator(),
+        };
+        let wire = proof_to_wire(&proof).unwrap();
+        assert_eq!(proof_from_wire(&wire).unwrap(), proof);
+    }
+
+    #[test]
+    fn proof_wire_rejects_incomplete_or_extra_coordinates() {
+        for length in [0, 255, 257, 288] {
+            let wire = Groth16ProofWire {
+                backend: ProofBackendWire::Groth16Bn254,
+                proof: base64::engine::general_purpose::STANDARD.encode(vec![0; length]),
+            };
+            assert!(proof_from_wire(&wire)
+                .unwrap_err()
+                .to_string()
+                .contains("eight 32-byte coordinates"));
+        }
+    }
+
+    #[test]
+    fn proof_wire_rejects_noncanonical_coordinates() {
+        let mut bytes = [0; 256];
+        bytes[..32].fill(0xff);
+        let wire = Groth16ProofWire {
+            backend: ProofBackendWire::Groth16Bn254,
+            proof: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        assert!(proof_from_wire(&wire)
+            .unwrap_err()
+            .to_string()
+            .contains("non-canonical BN254 base-field coordinate"));
+    }
+
+    #[test]
+    fn proof_wire_rejects_invalid_curve_points() {
+        let mut bytes = [0; 256];
+        bytes[63] = 1;
+        let wire = Groth16ProofWire {
+            backend: ProofBackendWire::Groth16Bn254,
+            proof: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        assert!(proof_from_wire(&wire)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid curve point"));
+    }
 
     #[test]
     fn commitment_update_matches_blinding_arithmetic() {

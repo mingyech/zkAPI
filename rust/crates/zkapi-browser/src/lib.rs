@@ -539,7 +539,7 @@ fn parse_address(value: &str) -> Result<[u8; 20]> {
         bail!("destination must be a 20-byte hex address");
     }
     let mut address = [0u8; 20];
-    for (index, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in raw.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         address[index] = u8::from_str_radix(
             std::str::from_utf8(chunk).context("address is not UTF-8")?,
             16,
@@ -754,7 +754,13 @@ mod tests {
             parse_address("0x1111111111111111111111111111111111111111").unwrap(),
             [0x11; 20]
         );
+        assert_eq!(
+            parse_address("000102030405060708090a0B0c0D0e0F10111213").unwrap(),
+            std::array::from_fn(|index| index as u8)
+        );
         assert!(parse_address("0x1234").is_err());
+        assert!(parse_address("0x111111111111111111111111111111111111111").is_err());
+        assert!(parse_address("0x11111111111111111111111111111111111111111").is_err());
         assert!(parse_address("0xgg11111111111111111111111111111111111111").is_err());
     }
 
