@@ -157,6 +157,7 @@ fn error_to_response(
         retriable: err.is_retriable(),
         latest_root,
         server_time_ms: Some(now_ms),
+        retry_after_seconds: None,
     };
 
     (status_code, Json(body))

@@ -19,12 +19,13 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
     using SafeERC20 for IERC20;
 
     uint16 public constant PROTOCOL_VERSION = 2;
-    uint64 public constant CHALLENGE_PERIOD = 24 hours;
+    uint64 public constant DEFAULT_CHALLENGE_PERIOD = 24 hours;
     uint64 public constant EXPIRY_BUCKET = 1 days;
     uint256 public constant MERKLE_DEPTH = 32;
 
     IERC20 public immutable billingToken;
     uint64 public immutable noteTtl;
+    uint64 public immutable challengePeriod;
     uint128 public immutable requestChargeCap;
     IZkApiProofAdapter public immutable proofAdapter;
     uint256 public immutable stateSigningKeyX;
@@ -50,6 +51,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         address billingToken_,
         address treasury_,
         uint64 noteTtl_,
+        uint64 challengePeriod_,
         uint128 requestChargeCap_,
         address proofAdapter_,
         uint256 stateSigningKeyX_,
@@ -58,7 +60,10 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         uint256 clearanceSigningKeyY_,
         address owner_
     ) Ownable(owner_) {
-        if (billingToken_ == address(0) || treasury_ == address(0) || proofAdapter_ == address(0)) {
+        if (
+            billingToken_ == address(0) || treasury_ == address(0) || proofAdapter_ == address(0)
+                || challengePeriod_ == 0
+        ) {
             revert Errors.Unauthorized();
         }
         _requireField(stateSigningKeyX_);
@@ -73,6 +78,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         billingToken = IERC20(billingToken_);
         treasury = treasury_;
         noteTtl = noteTtl_;
+        challengePeriod = challengePeriod_;
         requestChargeCap = requestChargeCap_;
         proofAdapter = IZkApiProofAdapter(proofAdapter_);
         stateSigningKeyX = stateSigningKeyX_;
@@ -137,7 +143,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         uint256 oldRoot = currentRoot;
         uint256 leaf = _leaf(inputs.noteId, note);
         uint256 newRoot = MerkleUpdateLib.verifyAndUpdate(oldRoot, inputs.noteId, leaf, 0, siblings);
-        uint64 deadline = uint64(block.timestamp) + CHALLENGE_PERIOD;
+        uint64 deadline = uint64(block.timestamp) + challengePeriod;
         currentRoot = newRoot;
         note.status = Types.NoteStatus.PendingWithdrawal;
         pendingWithdrawals[inputs.noteId] = Types.PendingWithdrawalData({

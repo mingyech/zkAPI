@@ -6,6 +6,7 @@ members = [
     "crates/zkapi-crypto",
     "crates/zkapi-proof",
     "crates/zkapi-client",
+    "crates/zkapi-browser",
     "crates/zkapi-indexer",
 ]
 

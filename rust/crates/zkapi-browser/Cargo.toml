@@ -1,0 +1,23 @@
+[package]
+name = "zkapi-browser"
+description = "Storage- and transport-agnostic zkAPI wallet core for WebAssembly"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zkapi-types = { workspace = true }
+zkapi-core = { workspace = true }
+zkapi-proof = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+getrandom = { version = "0.2", features = ["js"] }
+rand = { version = "0.8", features = ["getrandom"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

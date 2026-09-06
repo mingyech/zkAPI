@@ -100,10 +100,18 @@ pub struct RequestProver {
 }
 
 impl RequestProver {
-    pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+    /// Decode the canonical proving-key bytes supplied by the caller.
+    /// Browser clients use this because WebAssembly has no native filesystem.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self {
-            key: read_compressed(directory.as_ref().join(REQUEST_PROVING_KEY_FILE))?,
+            key: decode_compressed(bytes).context("decode request proving key")?,
         })
+    }
+
+    pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+        let path = directory.as_ref().join(REQUEST_PROVING_KEY_FILE);
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        Self::from_bytes(&bytes)
     }
 
     pub fn prove(
@@ -162,10 +170,17 @@ pub struct WithdrawalProver {
 }
 
 impl WithdrawalProver {
-    pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+    /// Decode the canonical proving-key bytes supplied by the caller.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self {
-            key: read_compressed(directory.as_ref().join(WITHDRAWAL_PROVING_KEY_FILE))?,
+            key: decode_compressed(bytes).context("decode withdrawal proving key")?,
         })
+    }
+
+    pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+        let path = directory.as_ref().join(WITHDRAWAL_PROVING_KEY_FILE);
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        Self::from_bytes(&bytes)
     }
 
     pub fn prove(
@@ -584,8 +599,12 @@ fn scalar_to_felt(value: &EdwardsScalarField) -> Felt252 {
 
 fn read_compressed<T: CanonicalDeserialize>(path: PathBuf) -> Result<T> {
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    T::deserialize_compressed(bytes.as_slice())
-        .with_context(|| format!("decode {}", path.display()))
+    decode_compressed(&bytes).with_context(|| format!("decode {}", path.display()))
+}
+
+fn decode_compressed<T: CanonicalDeserialize>(bytes: &[u8]) -> Result<T> {
+    T::deserialize_compressed(bytes)
+        .map_err(|error| anyhow!("deserialize compressed value: {error}"))
 }
 
 fn write_compressed<T: CanonicalSerialize>(path: PathBuf, value: &T) -> Result<()> {

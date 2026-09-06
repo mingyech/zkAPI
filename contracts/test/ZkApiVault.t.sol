@@ -6,6 +6,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {ZkApiVault} from "../src/ZkApiVault.sol";
 import {IZkApiProofAdapter} from "../src/interfaces/IZkApiProofAdapter.sol";
 import {Types} from "../src/libraries/Types.sol";
+import {Errors} from "../src/libraries/Errors.sol";
 import {Bn254Poseidon} from "../src/libraries/Bn254Poseidon.sol";
 
 contract AcceptAllProofAdapter is IZkApiProofAdapter {
@@ -41,6 +42,7 @@ contract ZkApiVaultTest is Test {
             address(token),
             treasury,
             30 days,
+            24 hours,
             100_000,
             address(adapter),
             STATE_X,
@@ -79,5 +81,52 @@ contract ZkApiVaultTest is Test {
         assertEq(token.balanceOf(user), 700_000);
         assertEq(token.balanceOf(treasury), 300_000);
         assertTrue(vault.usedNullifiers(99));
+        (,,, Types.NoteStatus status) = vault.notes(0);
+        assertEq(uint256(status), uint256(Types.NoteStatus.Closed));
+    }
+
+    function test_escapeHatchWaitsThenFinalizesFromAnyAccount() public {
+        vm.prank(user);
+        vault.deposit(bytes32(uint256(42)), DEPOSIT, emptySiblings);
+        uint256 depositedRoot = vault.currentRoot();
+
+        Types.WithdrawalPublicInputs memory inputs = Types.WithdrawalPublicInputs({
+            protocolVersion: 2,
+            chainId: uint64(block.chainid),
+            contractAddress: address(vault),
+            activeRoot: depositedRoot,
+            stateSigningKeyX: STATE_X,
+            stateSigningKeyY: STATE_Y,
+            clearanceSigningKeyX: CLEAR_X,
+            clearanceSigningKeyY: CLEAR_Y,
+            noteId: 0,
+            finalBalance: 800_000,
+            destination: user,
+            withdrawalNullifier: 101,
+            hasClearance: false,
+            withdrawalTag: 102
+        });
+        vault.initiateEscapeWithdrawal(inputs, "", emptySiblings);
+
+        (,,, Types.NoteStatus pendingStatus) = vault.notes(0);
+        assertEq(uint256(pendingStatus), uint256(Types.NoteStatus.PendingWithdrawal));
+        (bool exists,,,,, uint64 deadline) = vault.pendingWithdrawals(0);
+        assertTrue(exists);
+        assertEq(deadline, uint64(block.timestamp + 24 hours));
+        assertTrue(vault.usedNullifiers(101));
+
+        vm.expectRevert(Errors.ChallengeNotExpired.selector);
+        vault.finalizeEscapeWithdrawal(0);
+
+        vm.warp(deadline);
+        vm.prank(address(0xbeef));
+        vault.finalizeEscapeWithdrawal(0);
+
+        assertEq(token.balanceOf(user), 800_000);
+        assertEq(token.balanceOf(treasury), 200_000);
+        (,,, Types.NoteStatus finalStatus) = vault.notes(0);
+        assertEq(uint256(finalStatus), uint256(Types.NoteStatus.Closed));
+        (bool stillExists,,,,,) = vault.pendingWithdrawals(0);
+        assertFalse(stillExists);
     }
 }

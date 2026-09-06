@@ -176,6 +176,10 @@ pub struct ErrorResponse {
     pub latest_root: Option<Felt252>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_time_ms: Option<u64>,
+    /// Present for retriable throttling errors and mirrored in the HTTP
+    /// `Retry-After` header when the transport supports response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
 }
 
 /// API request payload sent by the client.
@@ -211,4 +215,27 @@ pub struct RecoveryResponse {
     pub nullifier_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_response: Option<RequestResponse>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ErrorResponse;
+
+    #[test]
+    fn legacy_error_response_without_retry_delay_remains_compatible() {
+        let response: ErrorResponse = serde_json::from_str(
+            r#"{
+                "status":"error",
+                "client_request_id":"request-1",
+                "error_code":"internal_error",
+                "error_message":"temporary failure",
+                "retriable":true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.retry_after_seconds, None);
+        let serialized = serde_json::to_value(response).unwrap();
+        assert!(serialized.get("retry_after_seconds").is_none());
+    }
 }
