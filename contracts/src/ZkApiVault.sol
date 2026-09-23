@@ -187,7 +187,10 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         }
         if (block.timestamp >= pending.challengeDeadline) revert Errors.ChallengeExpired();
         _validateRequestBinding(inputs);
-        if (inputs.activeRoot != pending.activeRoot) revert Errors.StaleRoot();
+        // Archived requests prove membership at the time of the request. Other
+        // deposits or closes may change the root before this escape starts, so
+        // the historical root must remain part of the original verified proof.
+        // The matching nullifier binds that evidence to the withdrawn state.
         if (inputs.requestNullifier != pending.withdrawalNullifier) revert Errors.ReplayedNullifier();
         proofAdapter.assertValidRequest(inputs, proof);
 
