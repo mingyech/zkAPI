@@ -1,3 +1,9 @@
+# Note-binding repair candidate
+
+This revision binds signed balances to the private membership leaf. It is
+incompatible with earlier v2 setups and deployed verifiers; see
+[setup compatibility](setup/v2/README.md). The v2 wire format is unchanged.
+
 # zkAPI
 
 Anonymous prepaid API usage credits using zero-knowledge proofs.

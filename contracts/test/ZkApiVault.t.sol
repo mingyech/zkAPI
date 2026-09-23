@@ -8,9 +8,19 @@ import {IZkApiProofAdapter} from "../src/interfaces/IZkApiProofAdapter.sol";
 import {Types} from "../src/libraries/Types.sol";
 import {Errors} from "../src/libraries/Errors.sol";
 import {Bn254Poseidon} from "../src/libraries/Bn254Poseidon.sol";
+import {NoteLeafLib} from "../src/libraries/NoteLeafLib.sol";
 
-contract AcceptAllProofAdapter is IZkApiProofAdapter {
-    function assertValidRequest(Types.RequestPublicInputs calldata, bytes calldata) external pure {}
+/// @dev Isolates vault checks; the real adapter has separate Groth16 fixture tests.
+contract MockProofAdapter is IZkApiProofAdapter {
+    bytes32 private acceptedRequest;
+
+    function acceptRequest(Types.RequestPublicInputs calldata inputs, bytes calldata proof) external {
+        acceptedRequest = keccak256(abi.encode(inputs, proof));
+    }
+
+    function assertValidRequest(Types.RequestPublicInputs calldata inputs, bytes calldata proof) external view {
+        if (keccak256(abi.encode(inputs, proof)) != acceptedRequest) revert Errors.InvalidProof();
+    }
 
     function assertValidWithdrawal(Types.WithdrawalPublicInputs calldata, bytes calldata) external pure {}
 }
@@ -24,7 +34,7 @@ contract ZkApiVaultTest is Test {
     uint256 constant CLEAR_Y = 14;
 
     ERC20Mock token;
-    AcceptAllProofAdapter adapter;
+    MockProofAdapter adapter;
     ZkApiVault vault;
     address user = address(0x1234);
     address treasury = address(0x5678);
@@ -37,7 +47,7 @@ contract ZkApiVaultTest is Test {
             zero = Bn254Poseidon.hash3(DOMAIN_NODE, zero, zero);
         }
         token = new ERC20Mock();
-        adapter = new AcceptAllProofAdapter();
+        adapter = new MockProofAdapter();
         vault = new ZkApiVault(
             address(token),
             treasury,
@@ -128,5 +138,232 @@ contract ZkApiVaultTest is Test {
         assertEq(uint256(finalStatus), uint256(Types.NoteStatus.Closed));
         (bool stillExists,,,,,) = vault.pendingWithdrawals(0);
         assertFalse(stillExists);
+    }
+
+    function test_challengesRequestAtEscapeRoot() public {
+        _depositFirstNote();
+        Types.RequestPublicInputs memory request = _archiveRequest();
+        _initiateEscape(emptySiblings);
+        _challengeAndAssertRestored(request, emptySiblings, request.activeRoot);
+    }
+
+    function test_challengesHistoricalRequestAfterUnrelatedDeposit() public {
+        _depositFirstNote();
+        Types.RequestPublicInputs memory request = _archiveRequest();
+        _depositSecondNote();
+        uint256 escapeRoot = vault.currentRoot();
+        assertNotEq(escapeRoot, request.activeRoot);
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+
+        _initiateEscape(siblings);
+        _challengeAndAssertRestored(request, siblings, escapeRoot);
+        (,,, Types.NoteStatus otherStatus) = vault.notes(1);
+        assertEq(uint256(otherStatus), uint256(Types.NoteStatus.Active));
+        assertEq(token.balanceOf(address(vault)), 2 * DEPOSIT);
+    }
+
+    function test_challengesHistoricalRequestAfterUnrelatedClose() public {
+        _depositFirstNote();
+        _depositSecondNote();
+        Types.RequestPublicInputs memory request = _archiveRequest();
+
+        Types.WithdrawalPublicInputs memory other = _withdrawalInputs(1, 202, true);
+        vault.mutualClose(other, "", _siblingsWithOtherLeaf(0));
+        uint256 escapeRoot = vault.currentRoot();
+        assertNotEq(escapeRoot, request.activeRoot);
+
+        _initiateEscape(emptySiblings);
+        _challengeAndAssertRestored(request, emptySiblings, escapeRoot);
+        (,,, Types.NoteStatus otherStatus) = vault.notes(1);
+        assertEq(uint256(otherStatus), uint256(Types.NoteStatus.Closed));
+        assertEq(token.balanceOf(address(vault)), DEPOSIT);
+    }
+
+    function test_historicalChallengeRestoresAgainstTreeChangedWhilePending() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        Types.WithdrawalPublicInputs memory other = _withdrawalInputs(1, 202, true);
+        vault.mutualClose(other, "", emptySiblings);
+
+        _challengeAndAssertRestored(request, emptySiblings, request.activeRoot);
+        (,,, Types.NoteStatus otherStatus) = vault.notes(1);
+        assertEq(uint256(otherStatus), uint256(Types.NoteStatus.Closed));
+        assertEq(token.balanceOf(address(vault)), DEPOSIT);
+    }
+
+    function test_historicalChallengeRejectsDifferentNullifier() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        request.requestNullifier += 1;
+        adapter.acceptRequest(request, hex"cafe");
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+
+        vm.expectRevert(Errors.ReplayedNullifier.selector);
+        vault.challengeEscapeWithdrawal(0, request, hex"cafe", siblings);
+        _assertPending();
+    }
+
+    function test_historicalChallengePreservesDeploymentAndKeyBinding() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+        for (uint256 field = 0; field < 5; ++field) {
+            Types.RequestPublicInputs memory invalid = _requestInputs(request.activeRoot);
+            if (field == 0) invalid.protocolVersion += 1;
+            if (field == 1) invalid.chainId += 1;
+            if (field == 2) invalid.contractAddress = address(0xdead);
+            if (field == 3) invalid.stateSigningKeyX += 1;
+            if (field == 4) invalid.stateSigningKeyY += 1;
+            // Even evidence accepted by the adapter must match this deployment.
+            adapter.acceptRequest(invalid, hex"cafe");
+
+            vm.expectRevert(Errors.InvalidDeploymentBinding.selector);
+            vault.challengeEscapeWithdrawal(0, invalid, hex"cafe", siblings);
+            _assertPending();
+        }
+    }
+
+    function test_historicalChallengeStillVerifiesOriginalProofAndRoot() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+        vm.expectRevert(Errors.InvalidProof.selector);
+        vault.challengeEscapeWithdrawal(0, request, hex"bad0", siblings);
+        _assertPending();
+
+        // Replacing the archived root must not bypass the adapter verification.
+        (, uint256 escapeRoot,,,,) = vault.pendingWithdrawals(0);
+        request.activeRoot = escapeRoot;
+        vm.expectRevert(Errors.InvalidProof.selector);
+        vault.challengeEscapeWithdrawal(0, request, hex"cafe", siblings);
+        _assertPending();
+    }
+
+    function test_historicalChallengeStillRequiresCurrentRestorationWitness() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        vm.expectRevert(Errors.StaleRoot.selector);
+        vault.challengeEscapeWithdrawal(0, request, hex"cafe", emptySiblings);
+        _assertPending();
+    }
+
+    function test_historicalChallengeStillExpiresAtDeadline() public {
+        Types.RequestPublicInputs memory request = _pendingAfterRootChange();
+        (,,,,, uint64 deadline) = vault.pendingWithdrawals(0);
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+        vm.warp(deadline);
+        vm.expectRevert(Errors.ChallengeExpired.selector);
+        vault.challengeEscapeWithdrawal(0, request, hex"cafe", siblings);
+        _assertPending();
+        vault.finalizeEscapeWithdrawal(0);
+        assertEq(token.balanceOf(user), 800_000);
+    }
+
+    function test_escapeStillRejectsStaleRootAfterUnrelatedDeposit() public {
+        _depositFirstNote();
+        Types.WithdrawalPublicInputs memory withdrawal = _withdrawalInputs(0, 101, false);
+        _depositSecondNote();
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(1);
+        vm.expectRevert(Errors.StaleRoot.selector);
+        vault.initiateEscapeWithdrawal(withdrawal, "", siblings);
+    }
+
+    function _depositFirstNote() private {
+        vm.prank(user);
+        vault.deposit(bytes32(uint256(42)), DEPOSIT, emptySiblings);
+    }
+
+    function _depositSecondNote() private {
+        token.mint(user, DEPOSIT);
+        uint256[32] memory siblings = _siblingsWithOtherLeaf(0);
+        vm.prank(user);
+        vault.deposit(bytes32(uint256(43)), DEPOSIT, siblings);
+    }
+
+    function _siblingsWithOtherLeaf(uint32 otherNoteId) private view returns (uint256[32] memory siblings) {
+        siblings = emptySiblings;
+        (bytes32 commitment, uint128 amount, uint64 expiryTs,) = vault.notes(otherNoteId);
+        siblings[0] = NoteLeafLib.computeLeaf(otherNoteId, commitment, amount, expiryTs);
+    }
+
+    function _requestInputs(uint256 root) private view returns (Types.RequestPublicInputs memory) {
+        return Types.RequestPublicInputs({
+            protocolVersion: 2,
+            chainId: uint64(block.chainid),
+            contractAddress: address(vault),
+            activeRoot: root,
+            stateSigningKeyX: STATE_X,
+            stateSigningKeyY: STATE_Y,
+            requestTime: uint64(block.timestamp),
+            solvencyBound: 100_000,
+            requestNullifier: 101,
+            authorizationTag: 103,
+            anonymousCommitmentX: 104,
+            anonymousCommitmentY: 105
+        });
+    }
+
+    function _archiveRequest() private returns (Types.RequestPublicInputs memory request) {
+        request = _requestInputs(vault.currentRoot());
+        adapter.acceptRequest(request, hex"cafe");
+        adapter.assertValidRequest(request, hex"cafe");
+    }
+
+    function _withdrawalInputs(uint32 noteId, uint256 nullifier, bool clearance)
+        private
+        view
+        returns (Types.WithdrawalPublicInputs memory)
+    {
+        return Types.WithdrawalPublicInputs({
+            protocolVersion: 2,
+            chainId: uint64(block.chainid),
+            contractAddress: address(vault),
+            activeRoot: vault.currentRoot(),
+            stateSigningKeyX: STATE_X,
+            stateSigningKeyY: STATE_Y,
+            clearanceSigningKeyX: CLEAR_X,
+            clearanceSigningKeyY: CLEAR_Y,
+            noteId: noteId,
+            finalBalance: 800_000,
+            destination: user,
+            withdrawalNullifier: nullifier,
+            hasClearance: clearance,
+            withdrawalTag: 102
+        });
+    }
+
+    function _initiateEscape(uint256[32] memory siblings) private {
+        vault.initiateEscapeWithdrawal(_withdrawalInputs(0, 101, false), "", siblings);
+    }
+
+    function _pendingAfterRootChange() private returns (Types.RequestPublicInputs memory request) {
+        _depositFirstNote();
+        request = _archiveRequest();
+        _depositSecondNote();
+        _initiateEscape(_siblingsWithOtherLeaf(1));
+    }
+
+    function _assertPending() private view {
+        (,,, Types.NoteStatus status) = vault.notes(0);
+        assertEq(uint256(status), uint256(Types.NoteStatus.PendingWithdrawal));
+        (bool exists,,,,,) = vault.pendingWithdrawals(0);
+        assertTrue(exists);
+        assertTrue(vault.usedNullifiers(101));
+    }
+
+    function _challengeAndAssertRestored(
+        Types.RequestPublicInputs memory request,
+        uint256[32] memory siblings,
+        uint256 expectedRoot
+    ) private {
+        (,,,,, uint64 deadline) = vault.pendingWithdrawals(0);
+        // Archived authorizations need not be fresh when the challenge arrives.
+        vm.warp(deadline - 1);
+        vm.prank(treasury);
+        vault.challengeEscapeWithdrawal(0, request, hex"cafe", siblings);
+        assertEq(vault.currentRoot(), expectedRoot);
+        (,,, Types.NoteStatus status) = vault.notes(0);
+        assertEq(uint256(status), uint256(Types.NoteStatus.Active));
+        (bool exists,,,,,) = vault.pendingWithdrawals(0);
+        assertFalse(exists);
+        assertTrue(vault.usedNullifiers(101));
+        vm.warp(deadline);
+        vm.expectRevert(Errors.NotPendingWithdrawal.selector);
+        vault.finalizeEscapeWithdrawal(0);
     }
 }

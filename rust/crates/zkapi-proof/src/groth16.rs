@@ -106,40 +106,56 @@ fn domain_var(label: &[u8]) -> FpVar<CircuitField> {
 /// to the standard Baby-JubJub generator is not known.
 pub fn balance_blinding_generator() -> EdwardsProjective {
     static GENERATOR: OnceLock<EdwardsProjective> = OnceLock::new();
-    *GENERATOR.get_or_init(|| {
-        for counter in 0u32..u32::MAX {
-            let mut digest = Keccak256::new();
-            digest.update(b"zkapi.v2.balance.blinding.generator");
-            digest.update(counter.to_be_bytes());
-            let x = EdwardsBaseField::from_be_bytes_mod_order(&digest.finalize());
-            let x_squared = x.square();
-            let numerator = EdwardsBaseField::ONE - x_squared;
-            let denominator = EdwardsBaseField::ONE - (EdwardsConfig::COEFF_D * x_squared);
-            let Some(denominator_inverse) = denominator.inverse() else {
-                continue;
-            };
-            let Some(mut y) = (numerator * denominator_inverse).sqrt() else {
-                continue;
-            };
-            if y.into_bigint().is_odd() {
-                y = -y;
-            }
-            let point = EdwardsAffine::new_unchecked(x, y)
-                .mul_bigint(EdwardsConfig::COFACTOR)
-                .into_affine();
-            if !point.is_zero() && point.is_in_correct_subgroup_assuming_on_curve() {
-                return point.into_group();
-            }
-        }
-        unreachable!("hash-to-curve counter exhausted")
-    })
+    *GENERATOR.get_or_init(|| derive_generator(b"zkapi.v2.balance.blinding.generator"))
 }
 
-pub fn balance_commitment(balance: u128, blinding: EdwardsScalarField) -> EdwardsProjective {
-    let balance_term =
-        EdwardsProjective::generator().mul_bigint(EdwardsScalarField::from(balance).into_bigint());
-    let blinding_term = balance_blinding_generator().mul_bigint(blinding.into_bigint());
-    balance_term + blinding_term
+/// Independent third Pedersen generator for the private active-note leaf.
+/// Do not derive this as a known scalar multiple of G or H: that would let
+/// a client absorb a different note binding into the balance or blinding.
+pub fn note_binding_generator() -> EdwardsProjective {
+    static GENERATOR: OnceLock<EdwardsProjective> = OnceLock::new();
+    *GENERATOR.get_or_init(|| derive_generator(b"zkapi.v2.note-binding.generator.v1"))
+}
+
+fn derive_generator(label: &[u8]) -> EdwardsProjective {
+    for counter in 0u32..u32::MAX {
+        let mut digest = Keccak256::new();
+        digest.update(label);
+        digest.update(counter.to_be_bytes());
+        let x = EdwardsBaseField::from_be_bytes_mod_order(&digest.finalize());
+        let x_squared = x.square();
+        let numerator = EdwardsBaseField::ONE - x_squared;
+        let denominator = EdwardsBaseField::ONE - (EdwardsConfig::COEFF_D * x_squared);
+        let Some(denominator_inverse) = denominator.inverse() else {
+            continue;
+        };
+        let Some(mut y) = (numerator * denominator_inverse).sqrt() else {
+            continue;
+        };
+        if y.into_bigint().is_odd() {
+            y = -y;
+        }
+        let point = EdwardsAffine::new_unchecked(x, y)
+            .mul_bigint(EdwardsConfig::COFACTOR)
+            .into_affine();
+        if !point.is_zero() && point.is_in_correct_subgroup_assuming_on_curve() {
+            return point.into_group();
+        }
+    }
+    unreachable!("hash-to-curve counter exhausted")
+}
+
+/// C = balance*G + blinding*H + note_leaf*J. The full canonical field
+/// representation of the leaf is multiplied by J (implicitly modulo its
+/// prime subgroup order), identically to the circuit's bit decomposition.
+pub fn balance_commitment(
+    balance: u128,
+    blinding: EdwardsScalarField,
+    note_leaf: CircuitField,
+) -> EdwardsProjective {
+    EdwardsProjective::generator().mul_bigint(EdwardsScalarField::from(balance).into_bigint())
+        + balance_blinding_generator().mul_bigint(blinding.into_bigint())
+        + note_binding_generator().mul_bigint(note_leaf.into_bigint())
 }
 
 pub fn rerandomize_commitment(
@@ -258,11 +274,16 @@ fn commitment_var(
     cs: ConstraintSystemRef<CircuitField>,
     balance: &UInt128<CircuitField>,
     blinding: EdwardsScalarField,
+    note_leaf: &FpVar<CircuitField>,
 ) -> Result<EdwardsVar, SynthesisError> {
     let g = EdwardsVar::new_constant(cs.clone(), EdwardsProjective::generator())?;
     let h = EdwardsVar::new_constant(cs.clone(), balance_blinding_generator())?;
+    let j = EdwardsVar::new_constant(cs.clone(), note_binding_generator())?;
     let blinding_bits = scalar_bits_witness(cs, blinding)?;
-    Ok(g.scalar_mul_le(balance.bits.iter())? + h.scalar_mul_le(blinding_bits.iter())?)
+    let note_bits = note_leaf.to_bits_le()?;
+    Ok(g.scalar_mul_le(balance.bits.iter())?
+        + h.scalar_mul_le(blinding_bits.iter())?
+        + j.scalar_mul_le(note_bits.iter())?)
 }
 
 fn enforce_signature(
@@ -402,7 +423,7 @@ impl ConstraintSynthesizer<CircuitField> for RequestCircuit {
                 expiry.to_fp()?,
             ],
         )?;
-        let mut current = leaf;
+        let mut current = leaf.clone();
         for (level, sibling_value) in self.witness.merkle_siblings.iter().enumerate() {
             let sibling = FpVar::new_witness(cs.clone(), || Ok(*sibling_value))?;
             let bit = &note_id.bits[level];
@@ -420,7 +441,7 @@ impl ConstraintSynthesizer<CircuitField> for RequestCircuit {
             .conditional_enforce_equal(&deposit_amount.to_fp()?, &is_genesis)?;
 
         let current_commitment =
-            commitment_var(cs.clone(), &balance, self.witness.current_blinding)?;
+            commitment_var(cs.clone(), &balance, self.witness.current_blinding, &leaf)?;
         let state_message = poseidon_hash_var(
             cs.clone(),
             &[
@@ -573,7 +594,7 @@ impl ConstraintSynthesizer<CircuitField> for WithdrawalCircuit {
                 expiry.to_fp()?,
             ],
         )?;
-        let mut current = leaf;
+        let mut current = leaf.clone();
         for (level, sibling_value) in self.witness.merkle_siblings.iter().enumerate() {
             let sibling = FpVar::new_witness(cs.clone(), || Ok(*sibling_value))?;
             let bit = &note_id.bits[level];
@@ -590,8 +611,12 @@ impl ConstraintSynthesizer<CircuitField> for WithdrawalCircuit {
             .to_fp()?
             .conditional_enforce_equal(&deposit_amount.to_fp()?, &is_genesis)?;
 
-        let current_commitment =
-            commitment_var(cs.clone(), &final_balance, self.witness.final_blinding)?;
+        let current_commitment = commitment_var(
+            cs.clone(),
+            &final_balance,
+            self.witness.final_blinding,
+            &leaf,
+        )?;
         let state_message = poseidon_hash_var(
             cs.clone(),
             &[
@@ -783,7 +808,7 @@ mod tests {
         let current_blinding = EdwardsScalarField::rand(&mut rng);
         let rerandomization = EdwardsScalarField::rand(&mut rng);
         let current_commitment =
-            balance_commitment(current_balance, current_blinding).into_affine();
+            balance_commitment(current_balance, current_blinding, leaf).into_affine();
         let anonymous_commitment =
             rerandomize_commitment(current_commitment.into_group(), rerandomization).into_affine();
         let current_anchor = CircuitField::from(12345u64);
@@ -845,7 +870,8 @@ mod tests {
         let active_root = merkle_root(note_id, leaf, &siblings);
         let final_balance = 4_900_000;
         let final_blinding = EdwardsScalarField::rand(&mut rng);
-        let current_commitment = balance_commitment(final_balance, final_blinding).into_affine();
+        let current_commitment =
+            balance_commitment(final_balance, final_blinding, leaf).into_affine();
         let current_anchor = CircuitField::from(12345u64);
         let state_signer = StateSigningKey::generate(&mut rng);
         let state_signature = state_signer.sign(
@@ -898,6 +924,89 @@ mod tests {
                 state_signature,
                 clearance_signature,
             },
+        }
+    }
+
+    #[test]
+    fn generators_are_distinct_nonzero_subgroup_points() {
+        let g = EdwardsProjective::generator();
+        let h = balance_blinding_generator();
+        let j = note_binding_generator();
+        assert_ne!(g, h);
+        assert_ne!(g, j);
+        assert_ne!(h, j);
+        for point in [h, j] {
+            assert_ne!(point, EdwardsProjective::default());
+            assert!(point.into_affine().is_on_curve());
+            assert!(point
+                .into_affine()
+                .is_in_correct_subgroup_assuming_on_curve());
+        }
+    }
+
+    #[test]
+    fn signed_state_cannot_move_to_another_note() {
+        for (secret, amount) in [(42, 5_000_000), (43, 5_000_000), (43, 6_000_000)] {
+            let mut circuit = fixture();
+            circuit.witness.secret = CircuitField::from(secret as u64);
+            circuit.witness.note_id = 1;
+            circuit.witness.deposit_amount = amount;
+            let leaf = note_leaf(
+                1,
+                registration_commitment(circuit.witness.secret),
+                amount,
+                circuit.witness.expiry,
+            );
+            circuit.public.active_root = merkle_root(1, leaf, &circuit.witness.merkle_siblings);
+            circuit.public.request_nullifier =
+                request_nullifier(circuit.witness.secret, circuit.witness.current_anchor);
+            circuit.public.authorization_tag = authorization_tag(
+                circuit.public.request_nullifier,
+                circuit.witness.request_context,
+            );
+            // Recompute everything the attacker controls for B; only A's genuine
+            // signature is retained. Both amounts exceed the current balance.
+            circuit.public.anonymous_commitment = rerandomize_commitment(
+                balance_commitment(
+                    circuit.witness.current_balance,
+                    circuit.witness.current_blinding,
+                    leaf,
+                ),
+                circuit.witness.rerandomization,
+            )
+            .into_affine();
+            let cs = ConstraintSystem::new_ref();
+            circuit.generate_constraints(cs.clone()).unwrap();
+            assert!(!cs.is_satisfied().unwrap());
+        }
+    }
+
+    #[test]
+    fn signed_withdrawal_cannot_move_to_another_note() {
+        for (secret, amount) in [(42, 5_000_000), (43, 5_000_000), (43, 6_000_000)] {
+            let mut circuit = withdrawal_fixture();
+            circuit.witness.secret = CircuitField::from(secret as u64);
+            circuit.public.note_id = 1;
+            circuit.witness.deposit_amount = amount;
+            let leaf = note_leaf(
+                1,
+                registration_commitment(circuit.witness.secret),
+                amount,
+                circuit.witness.expiry,
+            );
+            circuit.public.active_root = merkle_root(1, leaf, &circuit.witness.merkle_siblings);
+            circuit.public.withdrawal_nullifier =
+                request_nullifier(circuit.witness.secret, circuit.witness.current_anchor);
+            circuit.public.has_clearance = false;
+            circuit.public.withdrawal_tag = withdrawal_tag(
+                circuit.public.withdrawal_nullifier,
+                circuit.public.destination,
+                circuit.public.final_balance,
+                false,
+            );
+            let cs = ConstraintSystem::new_ref();
+            circuit.generate_constraints(cs.clone()).unwrap();
+            assert!(!cs.is_satisfied().unwrap());
         }
     }
 
