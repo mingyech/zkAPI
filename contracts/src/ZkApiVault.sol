@@ -24,6 +24,9 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
     uint256 public constant MERKLE_DEPTH = 32;
 
     IERC20 public immutable billingToken;
+    /// Zero for legacy ERC-20 deployments; one gwei for native ETH deployments.
+    uint256 public immutable nativeAssetWeiPerUnit;
+    uint128 public constant MAX_NATIVE_UNITS = 9_007_199_254_740_991;
     uint64 public immutable noteTtl;
     uint64 public immutable challengePeriod;
     uint128 public immutable requestChargeCap;
@@ -61,7 +64,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         address owner_
     ) Ownable(owner_) {
         if (
-            billingToken_ == address(0) || treasury_ == address(0) || proofAdapter_ == address(0)
+            treasury_ == address(0) || proofAdapter_ == address(0)
                 || challengePeriod_ == 0
         ) {
             revert Errors.Unauthorized();
@@ -76,6 +79,10 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         ) revert Errors.InvalidDeploymentBinding();
 
         billingToken = IERC20(billingToken_);
+        nativeAssetWeiPerUnit = billingToken_ == address(0) ? 1 gwei : 0;
+        if (billingToken_ == address(0) && (requestChargeCap_ == 0 || requestChargeCap_ > MAX_NATIVE_UNITS)) {
+            revert Errors.InvalidBalance();
+        }
         treasury = treasury_;
         noteTtl = noteTtl_;
         challengePeriod = challengePeriod_;
@@ -90,9 +97,17 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
 
     function deposit(bytes32 commitment, uint128 amount, uint256[32] calldata siblings)
         external
+        payable
         nonReentrant
         whenNotPaused
     {
+        if (nativeAssetWeiPerUnit != 0) {
+            if (amount > MAX_NATIVE_UNITS || msg.value != uint256(amount) * nativeAssetWeiPerUnit) {
+                revert Errors.InvalidNativeValue();
+            }
+        } else if (msg.value != 0) {
+            revert Errors.InvalidNativeValue();
+        }
         if (amount == 0) revert Errors.ZeroAmount();
         if (commitment == bytes32(0)) revert Errors.InvalidCommitment();
         _requireField(uint256(commitment));
@@ -108,7 +123,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         currentRoot = newRoot;
         notes[noteId] = Types.Note(commitment, amount, expiryTs, Types.NoteStatus.Active);
         nextNoteId = noteId + 1;
-        billingToken.safeTransferFrom(msg.sender, address(this), amount);
+        if (nativeAssetWeiPerUnit == 0) billingToken.safeTransferFrom(msg.sender, address(this), amount);
         emit NoteDeposited(noteId, commitment, amount, expiryTs, newRoot);
     }
 
@@ -210,7 +225,7 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
         uint128 amount = note.depositAmount;
         currentRoot = newRoot;
         note.status = Types.NoteStatus.Closed;
-        billingToken.safeTransfer(treasury, amount);
+        _transfer(treasury, amount);
         emit ExpiredClaimed(noteId, amount, newRoot);
     }
 
@@ -242,8 +257,17 @@ contract ZkApiVault is ReentrancyGuard, Ownable, Events {
     }
 
     function _pay(address destination, uint128 balance, uint128 operatorShare) private {
-        if (balance != 0) billingToken.safeTransfer(destination, balance);
-        if (operatorShare != 0) billingToken.safeTransfer(treasury, operatorShare);
+        if (balance != 0) _transfer(destination, balance);
+        if (operatorShare != 0) _transfer(treasury, operatorShare);
+    }
+
+    function _transfer(address destination, uint128 amount) private {
+        if (nativeAssetWeiPerUnit == 0) {
+            billingToken.safeTransfer(destination, amount);
+        } else {
+            (bool success,) = payable(destination).call{value: uint256(amount) * nativeAssetWeiPerUnit}("");
+            if (!success) revert Errors.NativeTransferFailed();
+        }
     }
 
     function _consumeNullifier(uint256 nullifier) private {

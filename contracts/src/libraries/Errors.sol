@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 /// @title Errors – Custom revert reasons for zkAPI
 library Errors {
+    error InvalidNativeValue();
+    error NativeTransferFailed();
     /// @notice The supplied proof did not verify.
     error InvalidProof();
 
