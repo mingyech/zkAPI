@@ -514,7 +514,7 @@ impl CommonFixture {
         let root = core::merkle_root(note_id, &leaf, &siblings);
         let balance = if genesis { deposit_amount } else { 900_000 };
         let blinding = Felt252::from_u64(7);
-        let commitment = balance_commitment(balance, &blinding);
+        let commitment = balance_commitment(balance, &blinding, &leaf);
         let anchor = if genesis {
             Felt252::ONE
         } else {

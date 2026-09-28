@@ -96,7 +96,16 @@ impl Wallet {
             return Err(ClientError::NoteAlreadyExists);
         }
         let blinding = random_scalar();
-        let commitment = balance_commitment(deposit_amount, &blinding);
+        let commitment = balance_commitment(
+            deposit_amount,
+            &blinding,
+            &core::note_leaf(
+                note_id,
+                &core::registration_commitment(&secret),
+                deposit_amount,
+                expiry,
+            ),
+        );
         let state = NoteState::new_from_deposit(
             self.config.protocol_version,
             self.config.chain_id,
@@ -189,7 +198,11 @@ impl Wallet {
 
         let siblings = siblings_array(merkle_siblings)?;
         let current_blinding = parse_scalar(&state.balance_blinding)?;
-        let expected_current = balance_commitment(state.current_balance, &current_blinding);
+        let expected_current = balance_commitment(
+            state.current_balance,
+            &current_blinding,
+            &state_note_leaf(state),
+        );
         ensure_stored_commitment(state, &expected_current)?;
         let rerandomization = random_scalar();
         let anonymous = rerandomize(&expected_current, &rerandomization)
@@ -268,6 +281,7 @@ impl Wallet {
         let current = balance_commitment(
             state.current_balance,
             &parse_scalar(&state.balance_blinding)?,
+            &state_note_leaf(state),
         );
         ensure_stored_commitment(state, &current)?;
         let anonymous = rerandomize(&current, &journal.user_rerandomization)
@@ -576,4 +590,13 @@ fn now_seconds() -> u64 {
 
 fn now_ms() -> u64 {
     now_seconds().saturating_mul(1_000)
+}
+
+fn state_note_leaf(state: &NoteState) -> Felt252 {
+    core::note_leaf(
+        state.note_id,
+        &core::registration_commitment(&state.secret_s),
+        state.deposit_amount,
+        state.expiry_ts,
+    )
 }

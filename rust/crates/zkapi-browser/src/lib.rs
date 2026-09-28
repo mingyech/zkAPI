@@ -197,7 +197,16 @@ pub fn confirm_deposit(
 ) -> Result<BrowserNoteState> {
     validate_state_identity(config, args.secret, args.amount)?;
     let blinding = random_scalar();
-    let commitment = balance_commitment(args.amount, &blinding);
+    let commitment = balance_commitment(
+        args.amount,
+        &blinding,
+        &core::note_leaf(
+            args.note_id,
+            &core::registration_commitment(&args.secret),
+            args.amount,
+            args.expiry_ts,
+        ),
+    );
     Ok(BrowserNoteState {
         protocol_version: config.protocol_version,
         chain_id: config.chain_id,
@@ -270,7 +279,11 @@ pub fn prepare_request_with_prover(
         );
     }
     let current_blinding = parse_scalar(&state.balance_blinding)?;
-    let current = balance_commitment(state.current_balance, &current_blinding);
+    let current = balance_commitment(
+        state.current_balance,
+        &current_blinding,
+        &state_note_leaf(state),
+    );
     ensure_stored_commitment(state, &current)?;
     let rerandomization = random_scalar();
     let anonymous = rerandomize(&current, &rerandomization)?;
@@ -352,7 +365,11 @@ pub fn complete_response(
         bail!("invalid charge or next anchor");
     }
     let current_blinding = parse_scalar(&args.state.balance_blinding)?;
-    let current = balance_commitment(args.state.current_balance, &current_blinding);
+    let current = balance_commitment(
+        args.state.current_balance,
+        &current_blinding,
+        &state_note_leaf(&args.state),
+    );
     ensure_stored_commitment(&args.state, &current)?;
     let anonymous = rerandomize(&current, &journal.user_rerandomization)?;
     let expected = server_update(
@@ -572,6 +589,11 @@ mod wasm {
     }
 
     #[wasm_bindgen]
+    pub fn browser_circuit_id() -> String {
+        zkapi_proof::compact::CIRCUIT_ID.to_owned()
+    }
+
+    #[wasm_bindgen]
     pub fn browser_generate_deposit() -> std::result::Result<String, JsValue> {
         encode(&generate_deposit_params())
     }
@@ -685,6 +707,15 @@ mod wasm {
     }
 }
 
+fn state_note_leaf(state: &BrowserNoteState) -> Felt252 {
+    core::note_leaf(
+        state.note_id,
+        &core::registration_commitment(&state.secret_s),
+        state.deposit_amount,
+        state.expiry_ts,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,7 +756,8 @@ mod tests {
         )
         .unwrap();
         let blinding = parse_scalar(&state.balance_blinding).unwrap();
-        let commitment = balance_commitment(state.current_balance, &blinding);
+        let commitment =
+            balance_commitment(state.current_balance, &blinding, &state_note_leaf(&state));
         ensure_stored_commitment(&state, &commitment).unwrap();
         assert_eq!(wallet_status(Some(&state), None).note.unwrap().note_id, 7);
     }

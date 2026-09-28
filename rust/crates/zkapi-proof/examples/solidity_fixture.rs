@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     let blinding = Felt252::from_u64(7);
     let rerandomization = Felt252::from_u64(9);
     let anonymous = rerandomize(
-        &balance_commitment(deposit_amount, &blinding),
+        &balance_commitment(deposit_amount, &blinding, &leaf),
         &rerandomization,
     )?;
     let nullifier = core::nullifier(&secret, &current_anchor);

@@ -1,10 +1,18 @@
+# Note-binding repair candidate
+
+This revision binds signed balances to the private membership leaf. It is
+incompatible with earlier v2 setups and deployed verifiers; see
+[setup compatibility](setup/v2/README.md). The v2 wire format is unchanged.
+
 # zkAPI
 
 Anonymous prepaid API usage credits using zero-knowledge proofs.
 
 ## Overview
 
-zkAPI lets users deposit ERC-20 tokens into an on-chain vault, use a private balance for off-chain API requests, and withdraw the remainder. Request proofs establish note membership and sufficient balance without revealing the note ID or balance.
+zkAPI lets users deposit native ETH or the deployment's configured ERC-20 token into an on-chain vault, use a private balance for off-chain API requests, and withdraw the remainder. Request proofs establish note membership and sufficient balance without revealing the note ID or balance.
+
+Native ETH vaults use integer gwei for balances and require exactly `amount * 1 gwei` in the deposit's `msg.value`. ERC-20 vaults retain token-base-unit accounting and reject ETH. The asset is fixed when the vault is deployed; this source update does not change existing vaults or migrate their notes.
 
 The protocol uses a **state-anchor chain**: each request derives a nullifier from the current private state, and the server signs the next balance commitment and anchor. Nullifiers identify reused states, while rerandomized commitments hide the link between successive balances.
 
@@ -72,7 +80,7 @@ Proving keys are supplied as bytes. `BrowserRequestProver` retains a decoded req
 ### Withdrawals
 
 - **Mutual close:** a withdrawal proof with server clearance closes the note immediately. The vault pays the remaining balance to the destination and the spent portion to the operator treasury.
-- **Escape withdrawal:** a proof without clearance removes the note from the active tree and starts the deployment's **challenge period**. The constructor requires a nonzero `challengePeriod`, which is immutable; `DEFAULT_CHALLENGE_PERIOD` is 24 hours, but callers must pass the duration explicitly. A valid request proof using the pending withdrawal's nullifier and saved root can challenge the withdrawal and restore the note. Anyone can finalize an unchallenged withdrawal after the deadline; funds go to its recorded destination and the treasury.
+- **Escape withdrawal:** a proof without clearance removes the note from the active tree and starts the deployment's **challenge period**. The constructor requires a nonzero `challengePeriod`, which is immutable; `DEFAULT_CHALLENGE_PERIOD` is 24 hours, but callers must pass the duration explicitly. A valid archived request proof whose nullifier matches the pending withdrawal can challenge it and restore the note. The challenge preserves that request proof's original historical root, even if unrelated deposits or closes have since changed the active root, and supplies a current Merkle path for restoration. Anyone can finalize an unchallenged withdrawal after the deadline; funds go to its recorded destination and the treasury.
 - **Expiry:** an expired active note can be claimed into the treasury.
 
 The vault binds proofs to protocol version `2`, chain ID, contract address, and immutable server signing keys. See [`ZkApiVault.sol`](contracts/src/ZkApiVault.sol) for the contract interface.

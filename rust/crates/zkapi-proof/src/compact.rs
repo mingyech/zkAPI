@@ -9,9 +9,10 @@ use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ed_on_bn254::{EdwardsAffine, EdwardsProjective, Fr as EdwardsScalarField};
 use ark_ff::{BigInteger, PrimeField, UniformRand};
 use ark_groth16::{Proof, ProvingKey, VerifyingKey};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::OsRng;
 use base64::Engine;
+use rand::rngs::OsRng;
 use serde::Serialize;
 use zkapi_core::v2 as core;
 use zkapi_types::wire::{CurvePointWire, Groth16ProofWire, ProofBackendWire};
@@ -26,6 +27,11 @@ use crate::groth16::{
     StateSigningKey, WithdrawalCircuit, WithdrawalPublic, WithdrawalWitness,
 };
 
+/// Circuit revision; the v2 wire format is unchanged, but pre-binding setup
+/// keys, signed states and deployed verifiers are incompatible.
+pub const CIRCUIT_ID: &str = "zkapi-v2-note-bound-v1";
+const KEY_HEADER: &[u8] = b"zkapi-v2-note-bound-v1\0";
+
 pub const REQUEST_PROVING_KEY_FILE: &str = "request.pk";
 pub const REQUEST_VERIFYING_KEY_FILE: &str = "request.vk";
 pub const WITHDRAWAL_PROVING_KEY_FILE: &str = "withdrawal.pk";
@@ -36,6 +42,7 @@ pub const SOLIDITY_VERIFIER_FILE: &str = "Groth16ProofAdapter.sol";
 
 #[derive(Serialize)]
 struct SetupManifest {
+    circuit_id: &'static str,
     protocol_version: u16,
     proof_backend: &'static str,
     request: VerifyingKeyManifest,
@@ -140,6 +147,7 @@ impl RequestProver {
                 )?,
             },
         };
+        validate_witness(circuit.clone())?;
         let proof = prove_request(&self.key, circuit, &mut OsRng)
             .map_err(|error| anyhow!("request proving failed: {error}"))?;
         proof_to_wire(&proof)
@@ -210,6 +218,7 @@ impl WithdrawalProver {
                 )?,
             },
         };
+        validate_witness(circuit.clone())?;
         let proof = prove_withdrawal(&self.key, circuit, &mut OsRng)
             .map_err(|error| anyhow!("withdrawal proving failed: {error}"))?;
         proof_to_wire(&proof)
@@ -348,6 +357,7 @@ pub fn setup(directory: impl AsRef<Path>) -> Result<()> {
         &withdrawal_vk,
     )?;
     let manifest = SetupManifest {
+        circuit_id: CIRCUIT_ID,
         protocol_version: 2,
         proof_backend: "groth16_bn254",
         request: verifying_key_manifest(&request_vk),
@@ -380,11 +390,15 @@ pub fn random_scalar() -> Felt252 {
     scalar_to_felt(&EdwardsScalarField::rand(&mut OsRng))
 }
 
-pub fn balance_commitment(balance: u128, blinding: &Felt252) -> CurvePointWire {
-    let point = EdwardsProjective::generator()
-        .mul_bigint(EdwardsScalarField::from(balance).into_bigint())
-        + balance_blinding_generator().mul_bigint(scalar(blinding).into_bigint());
-    point_to_wire(point.into_affine())
+pub fn balance_commitment(
+    balance: u128,
+    blinding: &Felt252,
+    note_leaf: &Felt252,
+) -> CurvePointWire {
+    point_to_wire(
+        crate::groth16::balance_commitment(balance, scalar(blinding), field(note_leaf))
+            .into_affine(),
+    )
 }
 
 pub fn rerandomize(
@@ -469,6 +483,21 @@ fn withdrawal_public_from_wire(public: &WithdrawalPublicInputsV2) -> Result<With
         has_clearance: public.has_clearance,
         withdrawal_tag: field(&public.withdrawal_tag),
     })
+}
+
+// Return a recoverable error for corrupt/transplanted private state instead of
+// relying on arkworks' debug assertion or spending time producing an invalid proof.
+fn validate_witness(circuit: impl ConstraintSynthesizer<Fr>) -> Result<()> {
+    let cs = ConstraintSystem::new_ref();
+    circuit
+        .generate_constraints(cs.clone())
+        .map_err(|error| anyhow!("invalid witness: {error}"))?;
+    anyhow::ensure!(
+        cs.is_satisfied()
+            .map_err(|error| anyhow!("invalid witness: {error}"))?,
+        "private state does not satisfy the note-bound circuit"
+    );
+    Ok(())
 }
 
 fn ensure_backend(proof: &Groth16ProofWire) -> Result<()> {
@@ -605,12 +634,17 @@ fn read_compressed<T: CanonicalDeserialize>(path: PathBuf) -> Result<T> {
 }
 
 fn decode_compressed<T: CanonicalDeserialize>(bytes: &[u8]) -> Result<T> {
-    T::deserialize_compressed(bytes)
-        .map_err(|error| anyhow!("deserialize compressed value: {error}"))
+    let mut bytes = bytes.strip_prefix(KEY_HEADER).ok_or_else(|| {
+        anyhow!("incompatible setup: expected {CIRCUIT_ID}; legacy unbound keys must not be used")
+    })?;
+    let value = T::deserialize_compressed(&mut bytes)
+        .map_err(|error| anyhow!("deserialize compressed value: {error}"))?;
+    anyhow::ensure!(bytes.is_empty(), "trailing setup key bytes");
+    Ok(value)
 }
 
 fn write_compressed<T: CanonicalSerialize>(path: PathBuf, value: &T) -> Result<()> {
-    let mut bytes = Vec::new();
+    let mut bytes = KEY_HEADER.to_vec();
     value
         .serialize_compressed(&mut bytes)
         .with_context(|| format!("encode {}", path.display()))?;
@@ -1051,6 +1085,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_setup_keys_are_rejected_before_decoding() {
+        assert!(RequestProver::from_bytes(&[0; 32])
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("decode request"));
+        assert!(decode_compressed::<VerifyingKey<Bn254>>(&[0; 32])
+            .unwrap_err()
+            .to_string()
+            .contains("incompatible setup"));
+    }
+
+    #[test]
     fn proof_wire_preserves_coordinate_order() {
         let proof = Proof::<Bn254> {
             a: G1Affine::generator(),
@@ -1108,11 +1155,14 @@ mod tests {
         let blind = random_scalar();
         let rerandomization = random_scalar();
         let delta = random_scalar();
-        let initial = balance_commitment(100, &blind);
+        let initial = balance_commitment(100, &blind, &Felt252::from_u64(42));
         let anonymous = rerandomize(&initial, &rerandomization).unwrap();
         let updated = server_update(&anonymous, 7, &delta).unwrap();
         let expected_blind = add_blindings(&add_blindings(&blind, &rerandomization), &delta);
-        assert_eq!(updated, balance_commitment(93, &expected_blind));
+        assert_eq!(
+            updated,
+            balance_commitment(93, &expected_blind, &Felt252::from_u64(42))
+        );
     }
 
     #[test]
